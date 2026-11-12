@@ -40,12 +40,15 @@ static func glow(color: Color, energy: float = 2.0, alpha: float = 1.0) -> Stand
 		m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	return m
 
-static func flat(color: Color, alpha: float = 1.0) -> StandardMaterial3D:
+static func flat(color: Color, alpha: float = -1.0) -> StandardMaterial3D:
+	# alpha 省略时用 color 自带的透明度——历史上调用方都把透明度写在 Color 里，
+	# 而旧实现用参数 1.0 覆盖了它，护盾/电网/屏障全渲染成不透明（实测教训）
+	var a := color.a if alpha < 0.0 else alpha
 	var m := StandardMaterial3D.new()
-	m.albedo_color = Color(color, alpha)
+	m.albedo_color = Color(color, a)
 	m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	m.cull_mode = BaseMaterial3D.CULL_DISABLED
-	if alpha < 1.0:
+	if a < 1.0:
 		m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	return m
 

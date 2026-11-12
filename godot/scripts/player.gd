@@ -1,7 +1,8 @@
 class_name Player
 extends Node3D
 
-## 玩家 Bill/Lance —— 原作复原造型（红头巾/背心或裸上身/蓝或红裤），关节枢轴动画
+## 玩家 Bill/Lance —— Quaternius UAL（CC0）骨骼模型 + 46 条动画（跑/跳/翻滚/趴/瞄准/死亡），
+## 红头巾/子弹带等身份件挂骨骼；瞄准俯仰走 AimModifier 胸骨后处理
 ## 状态只通过信号通知 Game，绝不直接改游戏状态（旧 JS 版致命 bug 的结构性教训，Godot 版沿用）
 
 signal died
@@ -28,14 +29,15 @@ var _flash_t := 0.0
 var _char_id := "bill"
 
 var visual: Node3D
-var _hip_l: Node3D
-var _hip_r: Node3D
-var _arm_l: Node3D
-var _arm_r: Node3D
-var _torso: Node3D
+var _model: Node3D
+var _anim: AnimationPlayer
+var _aim_mod: AimModifier
+var _cur_clip := ""
+var _sprinting := false
 var _shield: MeshInstance3D
 var _flash: MeshInstance3D
-var _gun_tip: Node3D
+
+static var _ual_scene: PackedScene = null
 
 func _init() -> void:
 	hp_cells = int(Data.PLAYER["max_cells"])
@@ -49,93 +51,26 @@ func _mat(c: Color, rough: float = 0.8, metal: float = 0.0) -> StandardMaterial3
 
 func _build_mesh() -> void:
 	var pal: Dictionary = Data.CHARACTERS[_char_id]
-	var skin := _mat(Color(0.83, 0.62, 0.44), 0.55)
-	var pants := _mat(pal["pants"], 0.9)
-	var top := _mat(pal["top"], 0.9)
-	var band := _mat(pal["bandana"], 0.85)
-	var hair_m := _mat(pal["hair"], 0.95)
-	var boot := _mat(Color(0.08, 0.07, 0.06), 0.7)
-	var gun_m := _mat(Color(0.1, 0.1, 0.11), 0.45, 0.8)
-
 	visual = Node3D.new()
 	add_child(visual)
-
-	# ---- 腿（髋枢轴）----
-	for side in [-1.0, 1.0]:
-		var hip := Node3D.new()
-		hip.position = Vector3(0.15 * side, 0.98, 0)
-		visual.add_child(hip)
-		var leg := Util.capsule(hip, 0.115, 0.92, pants, Vector3(0, -0.44, 0))
-		leg.scale = Vector3(1.15, 1, 1.15)
-		Util.box(hip, Vector3(0.17, 0.12, 0.3), boot, Vector3(0, -0.93, 0.05))
-		if side < 0: _hip_l = hip
-		else: _hip_r = hip
-	# 骨盆
-	Util.box(visual, Vector3(0.46, 0.24, 0.3), pants, Vector3(0, 1.04, 0))
-	Util.box(visual, Vector3(0.48, 0.09, 0.32), _mat(Color(0.3, 0.2, 0.1), 0.8), Vector3(0, 1.14, 0)) # 皮带
-
-	# ---- 躯干（壮实：胸肌+腹肌分层）----
-	_torso = Node3D.new()
-	_torso.position = Vector3(0, 1.12, 0)
-	visual.add_child(_torso)
-	var chest_mat: Material = top if not pal["bare_chest"] else skin
-	var chest := Util.cyl(_torso, 0.30, 0.215, 0.52, chest_mat, Vector3(0, 0.30, 0), 14)
-	chest.scale = Vector3(1.25, 1, 0.82)
-	var pecs := Util.sph(_torso, 0.21, chest_mat, Vector3(0, 0.44, 0.05))
-	pecs.scale = Vector3(1.55, 0.95, 0.85)
-	Util.cyl(_torso, 0.20, 0.185, 0.2, skin if not pal["bare_chest"] else chest_mat, Vector3(0, 0.02, 0), 12)
-	if pal["bare_chest"]:
-		# 兰斯：斜挎子弹带（兰博标志）
-		var strap := Util.box(_torso, Vector3(0.5, 0.09, 0.36), _mat(Color(0.25, 0.18, 0.1), 0.85), Vector3(0, 0.34, 0))
-		strap.rotation.z = 0.6
-	else:
-		# 比尔白背心肩带
-		Util.box(_torso, Vector3(0.13, 0.2, 0.3), top, Vector3(-0.2, 0.52, 0))
-		Util.box(_torso, Vector3(0.13, 0.2, 0.3), top, Vector3(0.2, 0.52, 0))
-
-	# ---- 手臂（肩枢轴）----
-	for side in [-1.0, 1.0]:
-		var sh := Node3D.new()
-		sh.position = Vector3(0.40 * side, 1.52, 0)
-		visual.add_child(sh)
-		var arm := Util.capsule(sh, 0.095, 0.8, skin, Vector3(0, -0.36, 0))
-		arm.scale = Vector3(1.2, 1, 1.2)
-		Util.sph(sh, 0.085, skin, Vector3(0, -0.74, 0))
-		if side < 0: _arm_l = sh
-		else: _arm_r = sh
-	# ---- 枪（挂右手）----
-	var gun := Node3D.new()
-	gun.position = Vector3(0, -0.74, 0.08)
-	_arm_r.add_child(gun)
-	Util.box(gun, Vector3(0.09, 0.14, 0.66), gun_m, Vector3(0, 0, 0.26))
-	Util.box(gun, Vector3(0.05, 0.05, 0.34), gun_m, Vector3(0, 0.03, 0.72))
-	Util.box(gun, Vector3(0.07, 0.2, 0.09), gun_m, Vector3(0, -0.13, 0.18))
-	Util.box(gun, Vector3(0.06, 0.12, 0.22), gun_m, Vector3(0, 0.1, 0.3))
-	_gun_tip = Node3D.new()
-	_gun_tip.position = Vector3(0, 0.03, 0.92)
-	gun.add_child(_gun_tip)
-
-	# ---- 头 ----
-	var head_p := Node3D.new()
-	head_p.position = Vector3(0, 1.60, 0)
-	visual.add_child(head_p)
-	Util.sph(head_p, 0.145, skin, Vector3(0, 0.15, 0))
-	var hair := Util.sph(head_p, 0.15, hair_m, Vector3(0, 0.185, -0.015))
-	hair.scale = Vector3(1, 0.82, 1)
-	if pal["long_hair"]:
-		var back := Util.box(head_p, Vector3(0.26, 0.34, 0.08), hair_m, Vector3(0, 0.02, -0.13))
-		back.rotation.x = 0.15
-	# 红头巾：环 + 后飘尾
-	var bandana := MeshInstance3D.new()
-	var tm := TorusMesh.new()
-	tm.inner_radius = 0.115
-	tm.outer_radius = 0.165
-	bandana.mesh = tm
-	bandana.material_override = band
-	bandana.position = Vector3(0, 0.235, 0)
-	bandana.rotation.x = PI / 2.0
-	head_p.add_child(bandana)
-	Util.box(head_p, Vector3(0.09, 0.3, 0.03), band, Vector3(0.09, 0.1, -0.17))
+	if _ual_scene == null:
+		_ual_scene = load("res://assets/char/ual.glb")
+	_model = _ual_scene.instantiate() as Node3D
+	visual.add_child(_model)
+	_tint_model(_model, Color(0.83, 0.62, 0.44) if _char_id == "bill" else Color(0.74, 0.52, 0.37))
+	_anim = _find_anim(_model)
+	if _anim:
+		for n in ["Idle", "Walk", "Jog_Fwd", "Sprint", "Crouch_Idle", "Crouch_Fwd", "Pistol_Idle", "Pistol_Aim_Up", "Pistol_Aim_Neutral", "Pistol_Aim_Down", "Swim_Idle"]:
+			if _anim.has_animation(n):
+				_anim.get_animation(n).loop_mode = Animation.LOOP_LINEAR
+	var skel := _find_skel(_model)
+	if skel:
+		_aim_mod = AimModifier.new()
+		skel.add_child(_aim_mod)
+		_attach_identity(skel, pal)
+		_attach_pants(skel, pal)
+		_attach_rifle(skel)
+	_play_clip("Idle")
 
 	# 防护罩
 	_shield = Util.sph(self, 1.3, Util.flat(Color(0.4, 0.8, 1, 0.20)), Vector3(0, 1.0, 0), 18, 12)
@@ -144,6 +79,107 @@ func _build_mesh() -> void:
 	# 枪口闪光（独立于 visual，避免翻滚影响）
 	_flash = Util.sph(get_parent() if get_parent() else self, 0.17, Util.glow(Color(1, 0.8, 0.35), 3.0, 0.0), Vector3.ZERO, 8, 6)
 	_flash.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+
+func _find_anim(n: Node) -> AnimationPlayer:
+	if n is AnimationPlayer:
+		return n
+	for c in n.get_children():
+		var r := _find_anim(c)
+		if r:
+			return r
+	return null
+
+func _find_skel(n: Node) -> Skeleton3D:
+	if n is Skeleton3D:
+		return n
+	for c in n.get_children():
+		var r := _find_skel(c)
+		if r:
+			return r
+	return null
+
+func _tint_model(n: Node, main_color: Color) -> void:
+	if n is MeshInstance3D:
+		var mi := n as MeshInstance3D
+		if mi.mesh:
+			for s in mi.mesh.get_surface_count():
+				var orig := mi.get_active_material(s)
+				if orig is StandardMaterial3D:
+					var m := (orig as StandardMaterial3D).duplicate() as StandardMaterial3D
+					# 关节面（M_Joints）压暗当阴影色，主体面用肤色——模型无贴图，直接定色
+					m.albedo_color = main_color.darkened(0.42) if orig.resource_name.contains("Joint") else main_color
+					m.albedo_texture = null
+					mi.set_surface_override_material(s, m)
+	for c in n.get_children():
+		_tint_model(c, main_color)
+
+func _bone_attach(skel: Skeleton3D, bone: String) -> BoneAttachment3D:
+	var ba := BoneAttachment3D.new()
+	ba.bone_name = bone
+	skel.add_child(ba)
+	return ba
+
+func _attach_identity(skel: Skeleton3D, pal: Dictionary) -> void:
+	var head := _bone_attach(skel, "DEF-head")
+	if _char_id == "bill":
+		# 比尔：红头巾（环 + 后飘尾）
+		var band_m := _mat(pal["bandana"], 0.85)
+		var bandana := MeshInstance3D.new()
+		var tm := TorusMesh.new()
+		tm.inner_radius = 0.095
+		tm.outer_radius = 0.15
+		bandana.mesh = tm
+		bandana.material_override = band_m
+		bandana.position = Vector3(0, 0.16, 0)
+		bandana.rotation.x = PI / 2.0
+		head.add_child(bandana)
+		Util.box(head, Vector3(0.09, 0.24, 0.03), band_m, Vector3(0.08, -0.02, -0.155))
+		# 白背心：筒形壳裹住躯干（挂 spine.002，平板会像广告牌——实测教训）
+		var chest := _bone_attach(skel, "DEF-spine.002")
+		var vest_m := _mat(pal["top"], 0.95)
+		var vest := Util.cyl(chest, 0.20, 0.165, 0.52, vest_m, Vector3(0, 0.10, 0), 12)
+		vest.scale = Vector3(1.3, 1, 0.85)
+	else:
+		# 兰斯：长发（发盖 + 后发）+ 斜挎子弹带
+		var hair_m := _mat(pal["hair"], 0.95)
+		var cap := Util.sph(head, 0.145, hair_m, Vector3(0, 0.17, -0.01), 12, 9)
+		cap.scale = Vector3(1, 0.85, 1)
+		Util.box(head, Vector3(0.24, 0.36, 0.07), hair_m, Vector3(0, 0.0, -0.13))
+		var chest := _bone_attach(skel, "DEF-spine.003")
+		var strap := Util.box(chest, Vector3(0.46, 0.09, 0.38), _mat(Color(0.25, 0.18, 0.1), 0.85), Vector3(0, 0.1, 0))
+		strap.rotation.z = 0.6
+
+func _attach_pants(skel: Skeleton3D, pal: Dictionary) -> void:
+	var pants_m := _mat(pal["pants"], 0.9)
+	var boot_m := _mat(Color(0.08, 0.07, 0.06), 0.7)
+	var hips := _bone_attach(skel, "DEF-hips")
+	Util.box(hips, Vector3(0.42, 0.3, 0.3), pants_m, Vector3(0, 0.03, 0))
+	Util.box(hips, Vector3(0.44, 0.08, 0.32), _mat(Color(0.3, 0.2, 0.1), 0.8), Vector3(0, 0.16, 0))
+	for side in ["L", "R"]:
+		var thigh := _bone_attach(skel, "DEF-thigh." + side)
+		Util.cyl(thigh, 0.11, 0.095, 0.54, pants_m, Vector3(0, -0.26, 0), 10)
+		var shin := _bone_attach(skel, "DEF-shin." + side)
+		Util.cyl(shin, 0.09, 0.075, 0.52, pants_m, Vector3(0, -0.25, 0), 10)
+		var foot := _bone_attach(skel, "DEF-foot." + side)
+		Util.box(foot, Vector3(0.11, 0.09, 0.27), boot_m, Vector3(0, -0.04, 0.05))
+
+func _attach_rifle(skel: Skeleton3D) -> void:
+	var hand := _bone_attach(skel, "DEF-hand.R")
+	var gun := Node3D.new()
+	hand.add_child(gun)
+	var gun_m := _mat(Color(0.1, 0.1, 0.11), 0.45, 0.8)
+	Util.box(gun, Vector3(0.07, 0.12, 0.62), gun_m, Vector3(0, 0, 0.24))
+	Util.box(gun, Vector3(0.045, 0.045, 0.3), gun_m, Vector3(0, 0.02, 0.68))
+	Util.box(gun, Vector3(0.06, 0.18, 0.08), gun_m, Vector3(0, -0.12, 0.16))
+	Util.box(gun, Vector3(0.055, 0.11, 0.2), gun_m, Vector3(0, 0.09, 0.28))
+	gun.position = Vector3(0, 0.03, 0.02)
+	gun.rotation.x = -0.3
+
+func _play_clip(clip_name: String) -> void:
+	if _anim == null or clip_name == _cur_clip or not _anim.has_animation(clip_name):
+		return
+	_cur_clip = clip_name
+	_anim.play(clip_name, 0.16)
 
 func chest_y() -> float:
 	return global_position.y + (0.4 if prone else 1.15)
@@ -180,6 +216,8 @@ func take_damage(cells: int) -> bool:
 	if hp_cells <= 0:
 		hp_cells = 0
 		alive = false
+		_cur_clip = ""
+		_play_clip("Death01")
 		died.emit()
 	return true
 
@@ -220,10 +258,12 @@ func update_player(dt: float, snap: Dictionary, level, p_aim_yaw: float, p_aim_p
 	var move: Vector2 = snap["move"]
 	var moving := move.length() > 0.1
 	var speed := float(Data.PLAYER["walk_speed"])
+	_sprinting = false
 	if prone:
 		speed = float(Data.PLAYER["prone_speed"])
 	elif bool(snap["run"]) and not aiming_or_shooting:
 		speed = float(Data.PLAYER["run_speed"])
+		_sprinting = true
 
 	var sin_y := sin(p_aim_yaw)
 	var cos_y := cos(p_aim_yaw)
@@ -307,30 +347,35 @@ func _resolve_horizontal(nx: float, nz: float, level) -> Vector2:
 				nz = float(c["z"]) + dz / d * min_d
 	return Vector2(nx, nz)
 
-func _sync_visual(dt: float, moving: bool, aiming: bool) -> void:
+func _sync_visual(_dt: float, moving: bool, aiming: bool) -> void:
 	rotation.y = facing
-	if not grounded and _flip > 0.0:
-		visual.rotation.x = -minf(_flip, 1.0) * TAU
+	# 瞄准俯仰 → 胸骨后处理（移动瞄准时上身跟随准星）
+	if _aim_mod:
+		var target_pitch := (aim_pitch * 0.55) if aiming else 0.0
+		_aim_mod.pitch = lerpf(_aim_mod.pitch, target_pitch, 0.35)
+	var clip := "Idle"
+	if not grounded:
+		# 跳跃自带翻跟头 → 直接播 Roll 片段（原作标志动作）；坠落播 Jump
+		clip = "Roll" if _flip > 0.0 else "Jump"
+		visual.rotation.x = 0.0
 		visual.position.y = 0.0
 	elif prone:
-		visual.rotation.x = 1.25
-		visual.position.y = -0.55
+		clip = "Crouch_Fwd" if moving else "Crouch_Idle"
+		visual.rotation.x = 1.15
+		visual.position.y = -0.5
 	else:
 		visual.rotation.x = 0.0
-		visual.position.y = absf(sin(_walk_phase)) * 0.07 if (moving and grounded) else 0.0
-	var swing := sin(_walk_phase) * 0.62 if (moving and grounded and not prone) else 0.0
-	_hip_l.rotation.x = swing
-	_hip_r.rotation.x = -swing
-	if aiming:
-		_arm_r.rotation.x = -PI / 2.0 - aim_pitch
-		_arm_l.rotation.x = -PI / 2.0 - aim_pitch + 0.12
-		_arm_l.rotation.y = -0.35
-		_torso.rotation.x = -aim_pitch * 0.28
-	else:
-		_arm_r.rotation.x = -swing * 0.7
-		_arm_l.rotation.x = swing * 0.7
-		_arm_l.rotation.y = 0.0
-		_torso.rotation.x = 0.0
+		visual.position.y = 0.0
+		if aiming and not moving:
+			clip = "Pistol_Aim_Up" if aim_pitch > 0.22 else ("Pistol_Aim_Down" if aim_pitch < -0.22 else "Pistol_Aim_Neutral")
+		elif moving:
+			if aiming:
+				clip = "Walk"
+			elif _sprinting:
+				clip = "Sprint"
+			else:
+				clip = "Jog_Fwd"
+	_play_clip(clip)
 
 func muzzle_world() -> Vector3:
 	var fx := sin(facing)

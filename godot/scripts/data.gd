@@ -46,14 +46,14 @@ const ENEMIES := {
 }
 
 const BOSSES := {
-	"defenseWall": {"name": "防御壁", "score": 3000},
-	"baseCore": {"name": "独炎眼·加尔马基尔马", "score": 4000},
-	"gromaides": {"name": "阴兽魔神像·古罗马伊德斯", "score": 5000},
-	"godomuga": {"name": "分幻鬼·戈多姆加", "score": 6000},
-	"guldaf": {"name": "反重力飞碟·古尔达夫", "score": 7000},
-	"gordea": {"name": "兜鬼巨神兵·戈尔迪亚", "score": 8000},
-	"finalGate": {"name": "最终闸门", "score": 9000},
-	"alienHeart": {"name": "天王创魔心·戈梅拉莫斯王", "score": 15000},
+	"defenseWall": {"name": "防御壁", "score": 3000, "hint": "先摧毁左右两座炮塔，再打中央红色核心"},
+	"baseCore": {"name": "独炎眼·加尔马基尔马", "score": 4000, "hint": "先打两侧炮舱，巨眼睁开时猛打眼球"},
+	"gromaides": {"name": "阴兽魔神像·古罗马伊德斯", "score": 5000, "hint": "魔像张嘴时，打它口中的核心"},
+	"godomuga": {"name": "分幻鬼·戈多姆加", "score": 6000, "hint": "四道幻影合而为一时，核心才会现身"},
+	"guldaf": {"name": "反重力飞碟·古尔达夫", "score": 7000, "hint": "打飞碟底部核心，小心它投下的孢子"},
+	"gordea": {"name": "兜鬼巨神兵·戈尔迪亚", "score": 8000, "hint": "打它胸前的圆盘核心，跳砸时拉开距离"},
+	"finalGate": {"name": "最终闸门", "score": 9000, "hint": "先摧毁左右两座炮塔，再打中央红色核心"},
+	"alienHeart": {"name": "天王创魔心·戈梅拉莫斯王", "score": 15000, "hint": "先斩守巢的龙神，心脏才会暴露"},
 }
 
 ## env: bg/fog 为十六进制色；sky: forest/snow（天空盒）或 none（室内只用环境反射）
@@ -173,6 +173,6 @@ const LEVELS := [
 
 ## 角色造型（原作复原）：bill 白背心蓝裤红头巾；lance 裸上身红裤长发红头巾
 const CHARACTERS := {
-	"bill": {"name": "比尔·雷泽", "sub": "Bill Rizer · 1P", "pants": Color(0.13, 0.27, 0.66), "top": Color(0.92, 0.92, 0.9), "bandana": Color(0.78, 0.1, 0.1), "hair": Color(0.23, 0.15, 0.08), "bare_chest": false, "long_hair": false},
-	"lance": {"name": "兰斯·比恩", "sub": "Lance Bean · 2P", "pants": Color(0.66, 0.13, 0.13), "top": Color(0.83, 0.62, 0.44), "bandana": Color(0.78, 0.1, 0.1), "hair": Color(0.16, 0.12, 0.09), "bare_chest": true, "long_hair": true},
+	"bill": {"name": "比尔·雷泽", "sub": "Bill Rizer · 1P", "tint": Color(1, 1, 1), "pants": Color(0.13, 0.27, 0.66), "top": Color(0.92, 0.92, 0.9), "bandana": Color(0.78, 0.1, 0.1), "hair": Color(0.23, 0.15, 0.08), "bare_chest": false, "long_hair": false},
+	"lance": {"name": "兰斯·比恩", "sub": "Lance Bean · 2P", "tint": Color(0.94, 0.78, 0.7), "pants": Color(0.66, 0.13, 0.13), "top": Color(0.83, 0.62, 0.44), "bandana": Color(0.78, 0.1, 0.1), "hair": Color(0.16, 0.12, 0.09), "bare_chest": true, "long_hair": true},
 }

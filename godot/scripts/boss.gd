@@ -21,7 +21,7 @@ class Part:
 	var owner: Boss
 	func on_hit(dmg: int, _point: Vector3 = Vector3.ZERO) -> void:
 		if owner:
-			owner._part_hit(self, dmg)
+			owner._part_hit(self, dmg, _point)
 
 var boss_id := ""
 var alive := true
@@ -99,21 +99,42 @@ func _sync_part_positions() -> void:
 # ---------------- 建模 ----------------
 func _build_wall(big: bool) -> void:
 	var s := 1.25 if big else 1.0
-	var wall_m := _pbr(Color(0.42, 0.35, 0.24) if not big else Color(0.4, 0.22, 0.2), 0.7, 0.4, "metal")
-	Util.box(_group, Vector3(17 * s, 5.2 * s, 1.2), wall_m, Vector3(0, 2.6 * s, 0))
-	Util.box(_group, Vector3(17 * s, 0.8, 1.8), _pbr(Color(0.2, 0.17, 0.13), 0.8, 0.3), Vector3(0, 5.6 * s, 0))
-	for sx in [-6.2 * s, 6.2 * s]:
+	var steel := _pbr(Color(0.34, 0.38, 0.43) if not big else Color(0.4, 0.26, 0.24), 0.5, 0.65, "metal")
+	var dark := _pbr(Color(0.15, 0.16, 0.18), 0.65, 0.5, "metal")
+	var conc := _pbr(Color(0.46, 0.45, 0.41), 0.9, 0.0, "concrete")
+	# 混凝土基座 + 三段钢板墙身（分段错缝，不再是一整块板）
+	Util.box(_group, Vector3(18.4 * s, 1.3, 2.4), conc, Vector3(0, 0.65, 0))
+	for i in 3:
+		var px := (-6.0 + float(i) * 6.0) * s
+		Util.box(_group, Vector3(5.7 * s, 5.6 * s, 1.1), steel, Vector3(px, 4.1 * s, 0))
+		Util.box(_group, Vector3(0.35, 5.6 * s, 0.25), dark, Vector3(px + 2.95 * s, 4.1 * s, 0.62))
+	Util.box(_group, Vector3(18.4 * s, 0.75, 1.7), dark, Vector3(0, 7.2 * s, 0))
+	# 顶部橙色警示灯带 + 两端信标
+	Util.box(_group, Vector3(17.6 * s, 0.2, 0.12), _glow(Color(1, 0.55, 0.1), 1.6), Vector3(0, 6.72 * s, 0.6))
+	for sx in [-8.6 * s, 8.6 * s]:
+		Util.sph(_group, 0.17, _glow(Color(1, 0.2, 0.1), 2.4), Vector3(sx, 7.75 * s, 0), 8, 6)
+	# 炮塔：墙面炮座 + 可旋转炮塔（半球罩 + 双管 + 红色传感器眼）
+	var turrets: Array = []
+	for sx in [-6.3 * s, 6.3 * s]:
+		Util.box(_group, Vector3(3.0, 1.3, 2.0), dark, Vector3(sx, 2.1 * s, 0.75))
 		var tur := Node3D.new()
-		tur.position = Vector3(sx, 2.4 * s, 0.9)
+		tur.position = Vector3(sx, 3.05 * s, 1.05)
 		_group.add_child(tur)
-		Util.cyl(tur, 0.75, 0.9, 1.5, _pbr(Color(0.3, 0.3, 0.32), 0.5, 0.7, "metal"), Vector3.ZERO, 12)
-		var bm := _pbr(Color(0.08, 0.08, 0.09), 0.4, 0.8)
-		var barrel := Util.cyl(tur, 0.13, 0.13, 1.1, bm, Vector3(0, 0.25, 0.75))
-		barrel.rotation.x = PI / 2.0
-		Util.sph(tur, 0.16, _glow(Color(1, 0.2, 0.1)), Vector3(0, 0.55, 0.5), 8, 6)
-		_add_part("turret", 300 if big else 220, tur, 1.15)
-	var core := Util.sph(_group, 0.85 * s, _glow(Color(1, 0.13, 0.13), 3.2), Vector3(0, 2.4 * s, 0.85), 16, 12)
-	var core_p := _add_part("core", 850 if big else 520, core, 1.0 * s, true)
+		Util.cyl(tur, 0.95, 1.1, 0.55, dark, Vector3(0, -0.1, 0), 14)
+		Util.sph(tur, 0.82, steel, Vector3(0, 0.28, 0), 14, 10)
+		var bm := _pbr(Color(0.07, 0.07, 0.08), 0.35, 0.85)
+		for bx in [-0.3, 0.3]:
+			var barrel := Util.cyl(tur, 0.09, 0.09, 1.5, bm, Vector3(bx, 0.42, 0.85))
+			barrel.rotation.x = PI / 2.0
+		Util.sph(tur, 0.17, _glow(Color(1, 0.15, 0.1), 2.6), Vector3(0, 0.78, 0.5), 8, 6)
+		turrets.append(tur)
+		_add_part("turret", 300 if big else 220, tur, 1.3)
+	_anim_nodes["turrets"] = turrets
+	# 核心：金属舱环 + 发光红核（被炮塔护着，双塔毁后暴露）
+	var housing := Util.cyl(_group, 1.5 * s, 1.5 * s, 0.55, dark, Vector3(0, 3.9 * s, 0.55), 20)
+	housing.rotation.x = PI / 2.0
+	var core := Util.sph(_group, 0.98 * s, _glow(Color(1, 0.13, 0.13), 3.2), Vector3(0, 3.9 * s, 0.95), 18, 14)
+	var core_p := _add_part("core", 850 if big else 520, core, 1.1 * s, true)
 	core_p.vulnerable = false
 	_anim_nodes["core"] = core
 
@@ -236,11 +257,16 @@ func _build_alien_heart() -> void:
 	_anim_nodes["heart_part"] = heart_p
 
 # ---------------- 受击/击败 ----------------
-func _part_hit(part: Part, dmg: int) -> void:
+func _part_hit(part: Part, dmg: int, point: Vector3 = Vector3.ZERO) -> void:
 	if not alive or not part.alive:
 		return
 	if not part.vulnerable:
+		# 无敌部位也要有反馈：蓝灰火花表示「打不动」，别让玩家以为没命中
+		if point != Vector3.ZERO:
+			_ctx["projectiles"].spawn_explosion_fx(point, 0.8, Color(0.5, 0.65, 1.0))
 		return
+	if point != Vector3.ZERO:
+		_ctx["projectiles"].spawn_explosion_fx(point, 0.9, Color(1.0, 0.75, 0.3))
 	part.hp -= dmg
 	_total_hp -= dmg
 	if part.hp <= 0:
@@ -265,6 +291,9 @@ func _on_part_destroyed(part: Part) -> void:
 				for p in targets:
 					if p.is_core:
 						p.vulnerable = true
+				var cb: Callable = _ctx.get("on_core_exposed", Callable())
+				if cb.is_valid():
+					cb.call()
 		"alienHeart":
 			if part.part_name == "dragon":
 				_anim_nodes["heart_part"].vulnerable = true
@@ -286,6 +315,20 @@ func update_boss(dt: float, player) -> void:
 	_t += dt
 	_sync_part_positions()
 	match boss_id:
+		"defenseWall", "finalGate":
+			var core: MeshInstance3D = _anim_nodes.get("core")
+			if core:
+				var cp: Part = null
+				for p in targets:
+					if p.is_core:
+						cp = p
+				var exposed := cp != null and cp.vulnerable
+				core.scale = Vector3.ONE * (1.0 + sin(_t * (5.5 if exposed else 2.0)) * (0.13 if exposed else 0.05))
+			if player:
+				for p in targets:
+					if p.part_name == "turret" and p.alive and p.node:
+						var d: Vector3 = player.global_position - p.node.global_position
+						p.node.rotation.y = atan2(d.x, d.z)
 		"guldaf":
 			var ship: Node3D = _anim_nodes["ship"]
 			ship.position.y = 6.4 + sin(_t * 1.3) * 0.5
@@ -336,7 +379,8 @@ func update_boss(dt: float, player) -> void:
 				_fire_timer = 1.5
 				for p in targets:
 					if p.part_name == "turret" and p.alive:
-						_orb_at(p.node.global_position + Vector3(0, 0.3, 0.6), player, 17.0, 0.3)
+						var fwd := Vector3(sin(p.node.rotation.y), 0, cos(p.node.rotation.y))
+						_orb_at(p.node.global_position + fwd * 1.6 + Vector3(0, 0.45, 0), player, 17.0, 0.3)
 		"baseCore":
 			if _fire_timer <= 0.0:
 				_fire_timer = 1.9

@@ -47,6 +47,9 @@ var boss: Boss
 var boss_activated := false
 var boss_z := 0.0
 var boss_y := 0.0
+var _barrier_wall: MeshInstance3D = null
+var _barrier_col: Dictionary = {}
+var _boss_blocker: Dictionary = {}
 var terrace_top_y := 0.0
 var pickups: PickupSystem
 var time := 0.0
@@ -163,8 +166,11 @@ func _build() -> void:
 		"projectiles": _ctx["projectiles"],
 		"on_score": _ctx["on_score"],
 		"on_defeated": _ctx["on_boss_defeated"],
+		"on_core_exposed": _ctx.get("on_core_exposed", Callable()),
 		"spawn_minion": func(t, x, z): _spawn_enemy(t, x, z),
 	})
+	# Boss 本体封路：打死前不能绕过去（击败后在更新循环里解除）
+	_boss_blocker = _add_collider({"type": "box", "x": 0.0, "z": boss_z, "w": width, "d": 2.2, "h": 9.0, "y0": boss_y})
 
 func _setup_environment(env_data: Dictionary) -> void:
 	var we: WorldEnvironment = _ctx["world_env"]
@@ -219,17 +225,91 @@ func _scatter(rand: RandomNumberGenerator, count: int, maker: Callable) -> void:
 		var x := (1.0 if rand.randf() > 0.5 else -1.0) * (3.5 + rand.randf() * (width / 2.0 - 4.5))
 		maker.call(x, 26.0 - dist, rand)
 
+var _leaf_mat: Material = null
+var _leaf_mat_snow: Material = null
+var _leaf_card_mesh: PlaneMesh = null
+
+static var _fern_scene: PackedScene = null
+static var _rock_scene: PackedScene = null
+static var _quiver_scene: PackedScene = null
+
+func _leaf_material(snow: bool) -> Material:
+	if snow and _leaf_mat_snow:
+		return _leaf_mat_snow
+	if not snow and _leaf_mat:
+		return _leaf_mat
+	var m := StandardMaterial3D.new()
+	m.albedo_texture = load("res://assets/tex/foliage_cluster_snow.png" if snow else "res://assets/tex/foliage_cluster.png")
+	m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR
+	m.alpha_scissor_threshold = 0.35
+	m.cull_mode = BaseMaterial3D.CULL_DISABLED
+	m.roughness = 1.0
+	if snow:
+		_leaf_mat_snow = m
+	else:
+		_leaf_mat = m
+	return m
+
 func _tree(x: float, z: float, rand: RandomNumberGenerator, snow: bool) -> void:
-	Util.cyl(self, 0.2, 0.32, 3.0, Util.pbr(Color(1, 1, 1), "bark", 0.95, 0.0, Vector2(1, 2)), Vector3(x, 1.5, z), 8)
-	var canopy_mat := Util.pbr(Color(0.8, 0.95, 1.05) if snow else Color(0.55, 0.8, 0.45), "canopy", 0.95, 0.0, Vector2(2, 2))
+	Util.cyl(self, 0.22, 0.36, 3.4, Util.pbr(Color(1, 1, 1), "bark", 0.95, 0.0, Vector2(1, 2)), Vector3(x, 1.7, z), 8)
 	var pivot := Node3D.new()
-	pivot.position = Vector3(x, 3.0, z)
+	pivot.position = Vector3(x, 3.3, z)
 	add_child(pivot)
-	for off in [Vector3(0, 1.6, 0), Vector3(0.7, 1.0, 0.3), Vector3(-0.6, 1.1, -0.3)]:
-		var s := Util.sph(pivot, 1.35, canopy_mat, off, 10, 7)
-		s.scale = Vector3(1.15, 0.85, 1.15)
+	if _leaf_card_mesh == null:
+		_leaf_card_mesh = PlaneMesh.new()
+		_leaf_card_mesh.size = Vector2(2.0, 1.6)
+	var mat := _leaf_material(snow)
+	# 球芯给体积（叶团贴图裹球），外层叶团卡破轮廓——不再是光滑绿球、也不是单叶贴纸
+	for off in [Vector3(0, 1.35, 0), Vector3(0.75, 0.8, 0.3), Vector3(-0.7, 0.9, -0.3)]:
+		var core := Util.sph(pivot, 1.25, mat, off, 12, 9)
+		core.scale = Vector3(1.15, 0.88, 1.15)
+	for c in [[0.0, 1.5, 0.0, 2.1], [1.25, 0.85, 0.45, 1.6], [-1.2, 0.95, -0.45, 1.6], [0.4, 0.8, 1.2, 1.5], [-0.45, 0.85, -1.2, 1.5]]:
+		var card := MeshInstance3D.new()
+		card.mesh = _leaf_card_mesh
+		card.material_override = mat
+		card.position = Vector3(c[0], c[1], c[2])
+		card.scale = Vector3.ONE * float(c[3])
+		card.rotation.y = rand.randf() * TAU
+		pivot.add_child(card)
+	var top := MeshInstance3D.new()
+	top.mesh = _leaf_card_mesh
+	top.material_override = mat
+	top.position = Vector3(0, 2.3, 0)
+	top.scale = Vector3.ONE * 1.9
+	top.rotation.x = -PI / 2.0
+	pivot.add_child(top)
 	_sway.append({"pivot": pivot, "phase": rand.randf() * TAU})
 	_add_collider({"type": "circle", "x": x, "z": z, "r": 0.5, "h": 3.0, "y0": 0.0})
+
+func _fern(x: float, z: float, rand: RandomNumberGenerator) -> void:
+	if _fern_scene == null:
+		_fern_scene = load("res://assets/veg/fern_02.glb")
+	var f := _fern_scene.instantiate() as Node3D
+	f.position = Vector3(x, get_support_y(x, z, 999.0), z)
+	f.rotation.y = rand.randf() * TAU
+	f.scale = Vector3.ONE * rand.randf_range(1.1, 1.9)
+	add_child(f)
+
+func _rock_glb(x: float, z: float, rand: RandomNumberGenerator) -> void:
+	if _rock_scene == null:
+		_rock_scene = load("res://assets/veg/rock_face_01.glb")
+	var r := _rock_scene.instantiate() as Node3D
+	var sc := rand.randf_range(0.8, 1.7)
+	r.position = Vector3(x, get_support_y(x, z, 999.0) - 0.25, z)
+	r.rotation.y = rand.randf() * TAU
+	r.scale = Vector3.ONE * sc
+	add_child(r)
+	_add_collider({"type": "circle", "x": x, "z": z, "r": 1.0 * sc, "h": 1.2 * sc, "y0": 0.0})
+
+func _quiver(x: float, z: float, rand: RandomNumberGenerator) -> void:
+	if _quiver_scene == null:
+		_quiver_scene = load("res://assets/veg/quiver_tree_02.glb")
+	var t := _quiver_scene.instantiate() as Node3D
+	t.position = Vector3(x, 0.0, z)
+	t.rotation.y = rand.randf() * TAU
+	t.scale = Vector3.ONE * rand.randf_range(0.8, 1.15)
+	add_child(t)
+	_add_collider({"type": "circle", "x": x, "z": z, "r": 0.6, "h": 3.0, "y0": 0.0})
 
 func _rock(x: float, z: float, rand: RandomNumberGenerator, scale_r: float = 0.9) -> void:
 	var rock := Util.sph(self, scale_r, Util.pbr(Color(0.85, 0.82, 0.75), "rock", 0.95, 0.0, Vector2(1.5, 1.5)), Vector3(x, scale_r * 0.45, z), 8, 6)
@@ -247,6 +327,8 @@ func _theme_jungle() -> void:
 		d += 7.0
 	_scatter(rand, 12, func(x, z, r): _add_box(x, z, 1.1, 1.1, 1.1, Util.pbr(Color(1, 1, 1), "planks", 0.9, 0.0, Vector2.ONE)))
 	_scatter(rand, 8, func(x, z, r): _rock(x, z, r))
+	_scatter(rand, 14, func(x, z, r): _fern(x, z, r))
+	_scatter(rand, 5, func(x, z, r): _rock_glb(x, z, r))
 	# 河 + 爆裂木桥（原作第1关标志）
 	var river_z := 26.0 - 70.0
 	_bridge_z = river_z
@@ -399,6 +481,11 @@ func _theme_energy() -> void:
 		_blink_mats.append({"mat": sm, "phase": d * 0.4})
 		d += 18.0
 	_scatter(rand, 8, func(x, z, r): _add_box(x, z, 1.2, 1.2, 1.3, Util.pbr(Color(0.8, 0.6, 0.4), "rust", 0.75, 0.4)))
+	d = 20.0
+	while d < length:
+		_quiver((1.0 if int(d) % 52 < 26 else -1.0) * (width / 2.0 + 4.5), 26.0 - d, rand)
+		d += 26.0
+	_scatter(rand, 5, func(x, z, r): _rock_glb(x, z, r))
 
 func _theme_hangar() -> void:
 	var rand := Util.seeded(6606)
@@ -644,8 +731,9 @@ func update_level(dt: float, player, camera_pos: Vector3) -> void:
 		if enemies[i].update_enemy(dt, player, camera_pos):
 			enemies[i].destroy_enemy()
 			enemies.remove_at(i)
-	# Boss 触发
-	if not boss_activated and dist >= length - 42.0:
+	# Boss 触发：玩家越过竞技场入口线（距终点 length-11）3 米后才落闸封场，
+	# 屏障必须落在玩家身后——旧口径 length-42 会把屏障刷在玩家面前，Boss 被封在墙后打不到（v3.0.0 软锁根因）
+	if not boss_activated and dist >= length - 8.0:
 		boss_activated = true
 		var barrier_z := boss_z + 27.0
 		var wall := MeshInstance3D.new()
@@ -653,17 +741,35 @@ func update_level(dt: float, player, camera_pos: Vector3) -> void:
 		wp.size = Vector2(width, 6.0)
 		wp.orientation = PlaneMesh.FACE_Z
 		wall.mesh = wp
-		wall.material_override = Util.flat(Color(1, 0.2, 0.27, 0.3))
+		var bm := Util.flat(Color(1, 0.2, 0.27, 0.16))
+		bm.emission_enabled = true
+		bm.emission = Color(1, 0.15, 0.2)
+		bm.emission_energy_multiplier = 0.7
+		wall.material_override = bm
 		wall.position = Vector3(0, boss_y + 3.0, barrier_z)
 		wall.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		add_child(wall)
-		_add_collider({"type": "box", "x": 0.0, "z": barrier_z, "w": width, "d": 0.7, "h": 8.0, "y0": boss_y})
+		_barrier_wall = wall
+		# 两侧发生器立柱：让能量墙看着是设备撑起来的，不是凭空一块红板
+		for px in [-width / 2.0 + 0.4, width / 2.0 - 0.4]:
+			Util.cyl(self, 0.32, 0.42, 6.4, Util.pbr(Color(0.2, 0.21, 0.24), "metal", 0.5, 0.6), Vector3(px, boss_y + 3.2, barrier_z), 10)
+			Util.sph(self, 0.3, Util.glow(Color(1, 0.2, 0.15), 2.2), Vector3(px, boss_y + 6.6, barrier_z), 10, 8)
+		_barrier_col = _add_collider({"type": "box", "x": 0.0, "z": barrier_z, "w": width, "d": 0.7, "h": 8.0, "y0": boss_y})
 		boss.activate()
 		_ctx["on_boss_activated"].call(boss)
 		_ctx["on_checkpoint"].call(Vector3(0, get_support_y(0.0, barrier_z - 4.0, 999.0), barrier_z - 4.0))
 		pickups.spawn_heal(3.0, barrier_z - 6.0, get_support_y(3.0, barrier_z - 6.0, 999.0))
 	if boss:
 		boss.update_boss(dt, player)
+	# 竞技场屏障：呼吸脉动；Boss 击败后撤场并解除封路
+	if _barrier_wall:
+		if boss and not boss.alive:
+			_barrier_wall.queue_free()
+			_barrier_wall = null
+			_barrier_col["disabled"] = true
+			_boss_blocker["disabled"] = true
+		else:
+			(_barrier_wall.material_override as StandardMaterial3D).albedo_color.a = 0.13 + sin(time * 5.0) * 0.045
 	# 电网脉动
 	for g in gates:
 		if g["sensor"].alive:

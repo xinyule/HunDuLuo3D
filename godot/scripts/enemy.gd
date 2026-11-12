@@ -20,6 +20,8 @@ var score_value := 0
 var _ctx: Dictionary
 var _data: Dictionary
 var _death_t := 0.0
+var _death_clip := false
+var _death_len := 0.85
 var _t := 0.0
 var _fire_timer := 1.0
 var _burst_left := 0
@@ -44,10 +46,10 @@ var _ak_shots := 0
 
 const HUMANOID := ["rifleman", "runner", "sniper", "mortar", "garth", "langel", "akbar"]
 const TINTS := {
-	"rifleman": Color(0.62, 0.66, 0.48), "runner": Color(0.85, 0.22, 0.16),
-	"sniper": Color(0.52, 0.46, 0.66), "mortar": Color(0.72, 0.6, 0.4),
-	"garth": Color(0.36, 0.39, 0.45), "langel": Color(0.52, 0.6, 0.74),
-	"akbar": Color(0.42, 0.54, 0.6),
+	"rifleman": Color(0.4, 0.44, 0.24), "runner": Color(0.74, 0.13, 0.09),
+	"sniper": Color(0.36, 0.3, 0.52), "mortar": Color(0.5, 0.38, 0.22),
+	"garth": Color(0.22, 0.24, 0.3), "langel": Color(0.32, 0.42, 0.6),
+	"akbar": Color(0.24, 0.4, 0.48),
 }
 
 func setup(p_type: String, pos: Vector3, ctx: Dictionary, soldier_scene: PackedScene) -> void:
@@ -110,7 +112,17 @@ func _build_soldier(soldier_scene: PackedScene) -> void:
 	_tint_recursive(_model, tint)
 	_anim = _find_anim(_model)
 	if _anim:
-		_anim.play("Run" if type == "runner" else "Idle")
+		for n in ["Idle", "Walk", "Jog_Fwd", "Sprint", "Pistol_Idle", "Swim_Idle"]:
+			if _anim.has_animation(n):
+				_anim.get_animation(n).loop_mode = Animation.LOOP_LINEAR
+		_death_clip = _anim.has_animation("Death01")
+		if _death_clip:
+			_death_len = _anim.get_animation("Death01").length + 0.3
+		match type:
+			"runner": _anim.play("Jog_Fwd")
+			"akbar": _anim.play("Swim_Idle")
+			"rifleman", "sniper", "garth", "langel": _anim.play("Pistol_Idle")
+			_: _anim.play("Idle")
 	# 枪械（除红衣突击兵无枪、榴弹兵用筒）
 	if type != "runner" and type != "mortar":
 		_attach_gun(_model, type == "sniper")
@@ -166,7 +178,7 @@ func _attach_gun(model: Node3D, long_gun: bool) -> void:
 	var skel := _find_skeleton(model)
 	if skel:
 		for i in skel.get_bone_count():
-			if skel.get_bone_name(i).contains("RightHand"):
+			if skel.get_bone_name(i).contains("RightHand") or skel.get_bone_name(i) == "DEF-hand.R":
 				var ba := BoneAttachment3D.new()
 				ba.bone_name = skel.get_bone_name(i)
 				skel.add_child(ba)
@@ -295,15 +307,24 @@ func on_hit(dmg: int, _point: Vector3 = Vector3.ZERO) -> void:
 
 func _die() -> void:
 	alive = false
-	_death_t = 0.85
 	AudioSys.play("die", -6.0, randf_range(0.9, 1.1))
 	if not _scored:
 		_scored = true
 		_ctx["on_score"].call(score_value)
 	if _hp_bar:
 		_hp_bar.visible = false
-	if _anim:
+	for m in _flash_mats:
+		if m is StandardMaterial3D:
+			(m as StandardMaterial3D).emission_enabled = false
+	if _anim and _death_clip:
+		# 真死亡动画（骨骼倒地），不再整个人像纸片一样翻倒
+		_death_t = _death_len
+		_anim.play("Death01", 0.08)
+	elif _anim:
+		_death_t = 0.85
 		_anim.stop()
+	else:
+		_death_t = 0.85
 	if type == "roller":
 		_ctx["projectiles"].spawn_explosion_fx(global_position + Vector3(0, 0.5, 0), 1.8)
 
@@ -334,9 +355,11 @@ func _fire_grenade(player, from_h: float = 1.1) -> void:
 func update_enemy(dt: float, player, camera_pos: Vector3) -> bool:
 	if not alive:
 		_death_t -= dt
-		var k := maxf(0.0, _death_t / 0.85)
-		rotation.x = (1.0 - k) * PI / 2.0 * 0.9
-		global_position.y = _base_y - (1.0 - k) * 0.35
+		if not _death_clip:
+			# 无骨骼死亡片段的自建敌人（炮塔/滚球等）才走整体翻倒
+			var k := maxf(0.0, _death_t / 0.85)
+			rotation.x = (1.0 - k) * PI / 2.0 * 0.9
+			global_position.y = _base_y - (1.0 - k) * 0.35
 		return _death_t <= 0.0
 	_t += dt
 	if _flash_t > 0.0:

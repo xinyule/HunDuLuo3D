@@ -77,7 +77,7 @@ func _on_frame() -> void:
 			_main._load_level(0)
 			_main._advance_dialog()
 			_main.player.barrier = 9999.0
-			_main.player.global_position = Vector3(0, 0, -(190.0 - 41.0) + 26.0)
+			_main.player.global_position = Vector3(0, 0, -(190.0 - 5.0) + 26.0)
 			_wait(40)
 		4:
 			_check(_main.current_level.boss_activated, "Boss 竞技场触发")

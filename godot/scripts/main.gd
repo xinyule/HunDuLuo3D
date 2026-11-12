@@ -69,7 +69,7 @@ const KONAMI := ["ui_up", "ui_up", "ui_down", "ui_down", "ui_left", "ui_right", 
 
 func _ready() -> void:
 	_register_input()
-	soldier_scene = load("res://assets/soldier.glb")
+	soldier_scene = load("res://assets/char/ual.glb")
 	camera = Camera3D.new()
 	add_child(camera)
 	world_env = WorldEnvironment.new()
@@ -159,9 +159,11 @@ func _build_menu_diorama() -> void:
 		if absf(x) < 5.0 and z > -6.0:
 			continue
 		Util.cyl(diorama, 0.2, 0.32, 3.0, Util.pbr(Color(1, 1, 1), "bark", 0.95, 0.0, Vector2(1, 2)), Vector3(x, 1.5, z), 7)
-		var can_mat := Util.pbr(Color(0.55, 0.8, 0.45), "canopy", 0.95, 0.0, Vector2(2, 2))
+		var can_mat := StandardMaterial3D.new()
+		can_mat.albedo_texture = load("res://assets/tex/foliage_cluster.png")
+		can_mat.roughness = 1.0
 		for off in [Vector3(0, 4.6, 0), Vector3(0.8, 4.0, 0.3), Vector3(-0.7, 4.1, -0.3)]:
-			var can := Util.sph(diorama, 1.45, can_mat, Vector3(x, 0, z) + off, 9, 7)
+			var can := Util.sph(diorama, 1.45, can_mat, Vector3(x, 0, z) + off, 12, 9)
 			can.scale = Vector3(1.15, 0.85, 1.15)
 	_menu_player = Player.new()
 	diorama.add_child(_menu_player)
@@ -597,6 +599,7 @@ func _load_level(idx: int) -> void:
 		"on_checkpoint": func(pos): checkpoint = pos,
 		"on_boss_activated": _on_boss_activated,
 		"on_boss_defeated": _on_boss_defeated,
+		"on_core_exposed": func(): _center_msg("⚠ 核心暴露！全力开火！"),
 	})
 	player = Player.new()
 	add_child(player)
@@ -630,7 +633,8 @@ func _advance_dialog() -> void:
 		cb.call()
 
 func _on_boss_activated(boss) -> void:
-	_center_msg("⚠ " + String(Data.BOSSES[boss.boss_id]["name"]) + " ⚠")
+	var bd: Dictionary = Data.BOSSES[boss.boss_id]
+	_center_msg("⚠ " + String(bd["name"]) + " ⚠\n" + String(bd.get("hint", "")))
 	_boss_bar.visible = true
 	_lbl_boss.text = String(Data.BOSSES[boss.boss_id]["name"])
 
