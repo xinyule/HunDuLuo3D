@@ -2,7 +2,7 @@
  * 主游戏引擎 — 渲染循环、UI管理、状态机
  */
 const Game = {
-    // 状态: menu, playing, gameover, victory, loading
+    // 状态: menu, playing, gameover, victory, loading, dialog
     state: 'menu',
     levelIndex: 0,
 
@@ -15,7 +15,6 @@ const Game = {
     // 游戏对象
     input: null,
     player: null,
-    weaponSystem: null,
     currentLevel: null,
 
     // UI 元素
@@ -26,6 +25,7 @@ const Game = {
 
         // 场景
         this.scene = new THREE.Scene();
+        this.scene.background = new THREE.Color(0x0a0a15);
 
         // 相机
         this.camera = new THREE.PerspectiveCamera(
@@ -54,6 +54,9 @@ const Game = {
 
         // 绑定按钮
         this._bindUI();
+
+        // 菜单背景
+        this._addMenuBackground();
 
         // 开始渲染循环（显示菜单背景）
         this._render();
@@ -98,6 +101,12 @@ const Game = {
     },
 
     _updateGame(deltaTime) {
+        // 检查玩家是否阵亡
+        if (!this.player.alive) {
+            this._onPlayerDeath();
+            return;
+        }
+
         // 处理输入
         // 换弹
         if (this.input.consumeReload()) {
@@ -110,21 +119,15 @@ const Game = {
             this.player.switchWeapon(ws);
         }
 
-        // 射击
-        const weapon = this.weaponSystem;
+        // 射击 — 直接调用 player.shoot
         const w = this.player.getCurrentWeapon();
-        // 自动武器：按住即射；半自动武器：每次点击射一发
         const wantShoot = w.auto ? this.input.isShooting() : this.input.consumeShoot();
         if (wantShoot) {
-            weapon.shoot(this.currentLevel.enemies);
+            this.player.shoot(this.currentLevel.enemies);
         }
 
         // 更新玩家
         this.player.update(deltaTime, this.input, this.currentLevel);
-
-        // 更新武器系统
-        weapon.update(deltaTime);
-        weapon.syncMuzzleToCamera();
 
         // 更新关卡（敌人AI等）
         this.currentLevel.update(deltaTime);
@@ -151,6 +154,16 @@ const Game = {
             this.currentLevel = null;
         }
 
+        // 清理旧玩家
+        if (this.player) {
+            this.player.destroy();
+            this.player = null;
+        }
+
+        // 清理场景中的旧物体
+        const toRemove = this.scene.children.filter(c => !c.isCamera && !c.isLight && !c.userData.isMenuParticle);
+        for (const obj of toRemove) this.scene.remove(obj);
+
         // 初始化音频
         AudioManager.init();
 
@@ -168,18 +181,25 @@ const Game = {
     },
 
     _loadLevel(index) {
+        // 清理旧关卡
         if (this.currentLevel) {
             this.currentLevel.destroy();
             this.currentLevel = null;
         }
+        if (this.player) {
+            this.player.destroy();
+            this.player = null;
+        }
+
+        // 清理场景中上一关的物体
+        const toRemove = this.scene.children.filter(c => !c.isCamera && !c.isLight && !c.userData.isMenuParticle);
+        for (const obj of toRemove) this.scene.remove(obj);
 
         const levelData = LEVELS_DATA[index];
         this.currentLevel = new Level(this.scene, levelData, index);
-        this.player = new Player(this.camera, this.currentLevel.colliders);
-        this.weaponSystem = new WeaponSystem(this.scene, this.player);
+        this.player = new Player(this.scene, this.camera, this.currentLevel.colliders);
 
-        // 设置玩家
-        this.player.setRotation(0, 0);
+        // 设置输入视角
         this.input.yaw = 0;
         this.input.pitch = 0;
 
@@ -196,6 +216,8 @@ const Game = {
         // 触屏控件
         if (this.input.isTouch) {
             document.getElementById('touchControls').classList.remove('hidden');
+        } else {
+            document.getElementById('touchControls').classList.add('hidden');
         }
 
         // 显示剧情
@@ -203,12 +225,15 @@ const Game = {
         if (levelData.story) {
             this._showDialog(levelData.story, () => {
                 // 对话框关闭后开始游戏
-                if (this.input.isTouch) {
-                    // 触屏不锁定指针
-                } else {
+                if (!this.input.isTouch) {
+                    // 桌面端：锁定鼠标实现视角控制
                     this.input.dom.requestPointerLock();
                 }
             });
+        } else {
+            if (!this.input.isTouch) {
+                this.input.dom.requestPointerLock();
+            }
         }
 
         this._updateWeaponSwitchUI();
@@ -262,6 +287,17 @@ const Game = {
         }, duration);
     },
 
+    _onPlayerDeath() {
+        if (this.state !== 'playing') return; // 防止重复触发
+        this.state = 'gameover';
+        AudioManager.gameOver();
+        document.getElementById('finalScore').textContent = this.player.score;
+        document.getElementById('hud').classList.add('hidden');
+        document.getElementById('touchControls').classList.add('hidden');
+        document.getElementById('gameOverScreen').classList.remove('hidden');
+        if (document.pointerLockElement) document.exitPointerLock();
+    },
+
     showMenu() {
         this.state = 'menu';
         document.getElementById('hud').classList.add('hidden');
@@ -276,10 +312,19 @@ const Game = {
             this.currentLevel.destroy();
             this.currentLevel = null;
         }
+        if (this.player) {
+            this.player.destroy();
+            this.player = null;
+        }
+
+        // 清理场景中所有非灯光物体
+        const toRemove = this.scene.children.filter(c => !c.isLight && !c.userData.isMenuParticle);
+        for (const obj of toRemove) this.scene.remove(obj);
+
         this.scene.background = new THREE.Color(0x0a0a15);
         this.scene.fog = null;
 
-        // 菜单背景：添加一些粒子效果
+        // 菜单背景：添加粒子效果
         this._addMenuBackground();
     },
 

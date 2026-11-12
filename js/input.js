@@ -36,9 +36,11 @@ class InputManager {
         window.addEventListener('keydown', (e) => {
             this.keys[e.code] = true;
             if (e.code === 'KeyR') this.reloadRequested = true;
+            if (e.code === 'Space') this.shootRequested = true;
             if (e.code === 'Digit1') this.weaponSwitchRequested = 0;
             if (e.code === 'Digit2') this.weaponSwitchRequested = 1;
             if (e.code === 'Digit3') this.weaponSwitchRequested = 2;
+            if (e.code === 'Digit4') this.weaponSwitchRequested = 3;
         });
         window.addEventListener('keyup', (e) => {
             this.keys[e.code] = false;
@@ -223,7 +225,7 @@ class InputManager {
     }
 
     isShooting() {
-        return this.mouseDown || this.shootHeld || false;
+        return this.mouseDown || this.shootHeld || this.keys['Space'] || false;
     }
 
     // 获取并消费一次性事件
