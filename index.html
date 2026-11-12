@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>魂斗罗3D - 第一人称射击</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <!-- 游戏画布 -->
+    <canvas id="gameCanvas"></canvas>
+
+    <!-- 开始菜单 -->
+    <div id="mainMenu" class="menu-overlay">
+        <div class="menu-content">
+            <h1 class="game-title">魂斗罗3D</h1>
+            <p class="game-subtitle">CONTRA 3D — 第一人称射击</p>
+            <div class="menu-buttons">
+                <button id="btnStart" class="menu-btn">开始游戏</button>
+                <button id="btnControls" class="menu-btn">操作说明</button>
+            </div>
+            <p class="menu-hint">PC: WASD移动 | 鼠标瞄准 | 左键射击 | R换弹 | 1-3切换武器</p>
+            <p class="menu-hint">手机: 左下摇杆移动 | 右下射击 | 拖动屏幕转向</p>
+        </div>
+    </div>
+
+    <!-- 操作说明弹窗 -->
+    <div id="controlsPanel" class="menu-overlay hidden">
+        <div class="menu-content controls-content">
+            <h2>操作说明</h2>
+            <div class="controls-grid">
+                <div class="control-row"><span class="key">W A S D</span><span>移动</span></div>
+                <div class="control-row"><span class="key">鼠标</span><span>视角转向</span></div>
+                <div class="control-row"><span class="key">左键</span><span>射击</span></div>
+                <div class="control-row"><span class="key">R</span><span>换弹</span></div>
+                <div class="control-row"><span class="key">1 2 3</span><span>切换武器</span></div>
+                <div class="control-row"><span class="key">Shift</span><span>加速跑</span></div>
+                <div class="control-row"><span class="key">手机摇杆</span><span>移动</span></div>
+                <div class="control-row"><span class="key">手机右下</span><span>射击</span></div>
+                <div class="control-row"><span class="key">手机拖屏</span><span>转向</span></div>
+            </div>
+            <button id="btnControlsClose" class="menu-btn">返回</button>
+        </div>
+    </div>
+
+    <!-- HUD 界面 -->
+    <div id="hud" class="hud hidden">
+        <!-- 准星 -->
+        <div class="crosshair" id="crosshair">
+            <div class="crosshair-dot"></div>
+            <div class="crosshair-line top"></div>
+            <div class="crosshair-line bottom"></div>
+            <div class="crosshair-line left"></div>
+            <div class="crosshair-line right"></div>
+        </div>
+
+        <!-- 血条 -->
+        <div class="hud-bottom-left">
+            <div class="health-container">
+                <span class="hud-label">HP</span>
+                <div class="health-bar">
+                    <div class="health-fill" id="healthFill"></div>
+                </div>
+                <span class="hud-value" id="healthValue">100</span>
+            </div>
+        </div>
+
+        <!-- 弹药 -->
+        <div class="hud-bottom-right">
+            <div class="ammo-container">
+                <span class="ammo-display" id="ammoDisplay">30 / 90</span>
+                <div class="weapon-name" id="weaponName">步枪</div>
+            </div>
+            <div class="reload-indicator hidden" id="reloadIndicator">换弹中...</div>
+        </div>
+
+        <!-- 关卡信息 -->
+        <div class="hud-top-center">
+            <div class="level-info">
+                <span class="level-name" id="levelName">第1关: 丛林</span>
+                <div class="objective-bar">
+                    <span class="objective-label">敌人</span>
+                    <div class="objective-progress">
+                        <div class="objective-fill" id="objectiveFill"></div>
+                    </div>
+                    <span class="objective-text"><span id="enemyKilled">0</span>/<span id="enemyTotal">0</span></span>
+                </div>
+            </div>
+        </div>
+
+        <!-- 分数 -->
+        <div class="hud-top-left">
+            <div class="score-display">分数: <span id="scoreValue">0</span></div>
+        </div>
+
+        <!-- 提示消息 -->
+        <div class="hud-center-msg hidden" id="centerMsg"></div>
+
+        <!-- 剧情对话框 -->
+        <div class="hud-dialog hidden" id="dialog">
+            <div class="dialog-text" id="dialogText"></div>
+            <div class="dialog-hint">点击继续</div>
+        </div>
+
+        <!-- 触屏控件 -->
+        <div class="touch-controls hidden" id="touchControls">
+            <!-- 左下摇杆 -->
+            <div class="joystick-area" id="joystickArea">
+                <div class="joystick-base" id="joystickBase">
+                    <div class="joystick-knob" id="joystickKnob"></div>
+                </div>
+            </div>
+            <!-- 右下射击 -->
+            <div class="shoot-btn" id="shootBtn">
+                <span>🔫</span>
+            </div>
+            <!-- 右上换弹 -->
+            <div class="reload-btn" id="reloadBtn">
+                <span>🔄</span>
+            </div>
+            <!-- 右上武器切换 -->
+            <div class="weapon-switch" id="weaponSwitch">
+                <div class="ws-btn" data-weapon="0">1</div>
+                <div class="ws-btn" data-weapon="1">2</div>
+                <div class="ws-btn" data-weapon="2">3</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 游戏结束 -->
+    <div id="gameOverScreen" class="menu-overlay hidden">
+        <div class="menu-content">
+            <h1 class="game-title-red">任务失败</h1>
+            <p class="game-subtitle" id="gameOverText">你已阵亡</p>
+            <div class="menu-buttons">
+                <button id="btnRetry" class="menu-btn">重新开始</button>
+                <button id="btnMenu" class="menu-btn">返回菜单</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 通关画面 -->
+    <div id="victoryScreen" class="menu-overlay hidden">
+        <div class="menu-content">
+            <h1 class="game-title-gold">任务完成！</h1>
+            <p class="game-subtitle">你成功消灭了所有敌人</p>
+            <p class="final-score">最终分数: <span id="finalScore">0</span></p>
+            <div class="menu-buttons">
+                <button id="btnVictoryRetry" class="menu-btn">再玩一次</button>
+                <button id="btnVictoryMenu" class="menu-btn">返回菜单</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 加载画面 -->
+    <div id="loadingScreen" class="menu-overlay hidden">
+        <div class="menu-content">
+            <h1 class="game-title">魂斗罗3D</h1>
+            <div class="loading-bar">
+                <div class="loading-fill" id="loadingFill"></div>
+            </div>
+            <p class="loading-text" id="loadingText">加载中...</p>
+        </div>
+    </div>
+
+    <script src="js/three.min.js"></script>
+    <script src="js/config.js"></script>
+    <script src="js/utils.js"></script>
+    <script src="js/input.js"></script>
+    <script src="js/player.js"></script>
+    <script src="js/weapon.js"></script>
+    <script src="js/enemy.js"></script>
+    <script src="js/level.js"></script>
+    <script src="js/game.js"></script>
+</body>
+</html>
