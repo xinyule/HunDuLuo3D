@@ -1,476 +1,334 @@
 /**
- * 玩家系统 — 第三人称控制器（GTA风格）
- * Bill Rizer — 魂斗罗主角
+ * 玩家 — Bill Rizer
+ * 动作：移动/疾跑/跳跃（翻跟头）/趴下；武器靠道具换枪、无限弹药；
+ * 伤害走格血（折中档）；玩家只发事件回调，绝不直接改 Game.state（旧版致命 bug 的结构性修复）。
  */
 class Player {
-    constructor(scene, camera, colliders) {
+    constructor(scene) {
         this.scene = scene;
-        this.camera = camera;
-        this.colliders = colliders;
-        this.position = { x: 0, y: 0, z: 30 };
-        this.yaw = 0;
-        this.pitch = 0;
-        this.health = CONFIG.player.health;
-        this.maxHealth = CONFIG.player.health;
+        this.position = { x: 0, y: 0, z: 26 };
+        this.radius = CONFIG.player.radius;
+        this.facing = Math.PI; // 朝 -Z
+        this.vy = 0;
+        this.grounded = true;
+        this.prone = false;
         this.alive = true;
-        this.lastDamageTime = 0;
-        this.regenTimer = 0;
 
-        // 武器管理
-        this.currentWeapon = 0;
-        this.weaponAmmo = {};
-        this.isReloading = false;
-        this.reloadTimer = 0;
-        this.lastShotTime = 0;
+        this.hpCells = CONFIG.player.maxCells;
+        this.weapon = 'N';
+        this.rapid = false;
+        this.barrier = 0;
+        this.invuln = 0;
+        this._blink = false;
 
-        for (let i = 0; i < 4; i++) {
-            const w = CONFIG.weapons[i];
-            this.weaponAmmo[i] = { mag: w.magSize, reserve: w.reserveAmmo };
-        }
+        this.fireTimer = 0;
+        this.walkPhase = 0;
+        this._flip = 0;
+        this._flashT = 0;
 
-        this.score = 0;
+        // 事件回调（Game 赋值）
+        this.onDeath = null;
+        this.onDamaged = null;
 
-        // 创建角色模型
-        this._createCharacter();
+        this._buildMesh();
+    }
+
+    _buildMesh() {
+        const g = new THREE.Group();
+        const body = new THREE.Group();
+        g.add(body);
+        this.bodyGroup = body;
+
+        const skin = new THREE.MeshLambertMaterial({ color: 0xd4a574 });
+        const blue = new THREE.MeshLambertMaterial({ color: 0x2244aa });
+        const white = new THREE.MeshLambertMaterial({ color: 0xeeeeee });
+        const dark = new THREE.MeshLambertMaterial({ color: 0x664422 });
+        const gunMat = new THREE.MeshLambertMaterial({ color: 0x2a2a2a });
+
+        const head = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.34, 0.34), skin);
+        head.position.y = 1.62; body.add(head);
+        const bandana = new THREE.Mesh(new THREE.BoxGeometry(0.37, 0.12, 0.37), blue);
+        bandana.position.y = 1.8; body.add(bandana);
+        const bandTail = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.3, 0.04), blue);
+        bandTail.position.set(0.1, 1.62, -0.2); body.add(bandTail);
+
+        const torso = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.62, 0.34), white);
+        torso.position.y = 1.14; body.add(torso);
+        const shorts = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.24, 0.35), blue);
+        shorts.position.y = 0.7; body.add(shorts);
+
+        const armL = new THREE.Mesh(new THREE.BoxGeometry(0.13, 0.55, 0.13), skin);
+        armL.position.set(-0.35, 1.16, 0.05); body.add(armL);
+        this.armL = armL;
+
+        // 右臂+枪（瞄准时前指）
+        const armRGroup = new THREE.Group();
+        armRGroup.position.set(0.35, 1.38, 0);
+        const armR = new THREE.Mesh(new THREE.BoxGeometry(0.13, 0.5, 0.13), skin);
+        armR.position.y = -0.2; armRGroup.add(armR);
+        const gun = new THREE.Group();
+        const gunBody = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.13, 0.62), gunMat);
+        gunBody.position.z = 0.28; gun.add(gunBody);
+        const barrel = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.05, 0.3), gunMat);
+        barrel.position.z = 0.66; gun.add(barrel);
+        gun.position.set(0, -0.42, 0.1);
+        gun.rotation.x = -0.25;
+        armRGroup.add(gun);
+        body.add(armRGroup);
+        this.armRGroup = armRGroup;
+        this.gun = gun;
+
+        const legGeo = new THREE.BoxGeometry(0.16, 0.62, 0.16);
+        const legL = new THREE.Mesh(legGeo, dark); legL.position.set(-0.14, 0.32, 0); body.add(legL);
+        const legR = new THREE.Mesh(legGeo, dark); legR.position.set(0.14, 0.32, 0); body.add(legR);
+        this.legL = legL; this.legR = legR;
+        // 腿的摆动绕髋：用几何偏移近似（position 微调在动画里处理）
+
+        // B 道具防护罩
+        const shield = new THREE.Mesh(
+            new THREE.SphereGeometry(1.25, 12, 10),
+            new THREE.MeshBasicMaterial({ color: 0x66ccff, transparent: true, opacity: 0.22, depthWrite: false })
+        );
+        shield.position.y = 1.0;
+        shield.visible = false;
+        g.add(shield);
+        this.shieldMesh = shield;
 
         // 枪口闪光
-        this.muzzleFlash = null;
-        this._createMuzzleFlash();
-
-        this._updateCamera();
-    }
-
-    _createCharacter() {
-        const group = new THREE.Group();
-
-        // Bill Rizer — 经典魂斗罗造型：蓝色头巾、肤色身体、蓝色短裤
-        // 头
-        const headMat = new THREE.MeshLambertMaterial({ color: 0xd4a574 });
-        const head = new THREE.Mesh(new THREE.BoxGeometry(0.35, 0.35, 0.35), headMat);
-        head.position.y = 1.7;
-        group.add(head);
-
-        // 蓝色头巾
-        const bandanaMat = new THREE.MeshLambertMaterial({ color: 0x2244aa });
-        const bandana = new THREE.Mesh(new THREE.BoxGeometry(0.38, 0.12, 0.38), bandanaMat);
-        bandana.position.y = 1.88;
-        group.add(bandana);
-
-        // 身体（白色背心）
-        const bodyMat = new THREE.MeshLambertMaterial({ color: 0xeeeeee });
-        const body = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.65, 0.35), bodyMat);
-        body.position.y = 1.2;
-        group.add(body);
-
-        // 蓝色短裤
-        const shortsMat = new THREE.MeshLambertMaterial({ color: 0x2244aa });
-        const shorts = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.25, 0.35), shortsMat);
-        shorts.position.y = 0.72;
-        group.add(shorts);
-
-        // 手臂
-        const armMat = new THREE.MeshLambertMaterial({ color: 0xd4a574 });
-        const armR = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.55, 0.12), armMat);
-        armR.position.set(0.34, 1.2, 0);
-        group.add(armR);
-        const armL = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.55, 0.12), armMat);
-        armL.position.set(-0.34, 1.2, 0);
-        group.add(armL);
-
-        // 腿
-        const legMat = new THREE.MeshLambertMaterial({ color: 0x664422 });
-        const legR = new THREE.Mesh(new THREE.BoxGeometry(0.15, 0.65, 0.15), legMat);
-        legR.position.set(0.13, 0.32, 0);
-        group.add(legR);
-        const legL = new THREE.Mesh(new THREE.BoxGeometry(0.15, 0.65, 0.15), legMat);
-        legL.position.set(-0.13, 0.32, 0);
-        group.add(legL);
-
-        // 枪（背在身上或拿在手上）
-        const gunGroup = new THREE.Group();
-        const gunMat = new THREE.MeshLambertMaterial({ color: 0x333333 });
-        const gunBody = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.12, 0.6), gunMat);
-        gunBody.position.z = 0.3;
-        gunGroup.add(gunBody);
-        const gunBarrel = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.05, 0.3), gunMat);
-        gunBarrel.position.z = 0.65;
-        gunGroup.add(gunBarrel);
-        gunGroup.position.set(0.25, 1.2, 0.15);
-        group.add(gunGroup);
-        this.gunMesh = gunGroup;
-
-        this.walkPhase = 0;
-        this.mesh = group;
-        this.mesh.position.set(this.position.x, 0, this.position.z);
-        this.scene.add(this.mesh);
-    }
-
-    _createMuzzleFlash() {
-        const geo = new THREE.SphereGeometry(0.2, 6, 6);
-        const mat = new THREE.MeshBasicMaterial({ color: 0xffaa00, transparent: true, opacity: 0 });
-        this.muzzleFlash = new THREE.Mesh(geo, mat);
-        this.scene.add(this.muzzleFlash);
-    }
-
-    _updateCamera() {
-        // 第三人称：相机在角色身后上方
-        const dist = CONFIG.player.cameraDistance;
-        const height = CONFIG.player.cameraHeight;
-        const lookAhead = CONFIG.player.cameraLookAhead;
-
-        const camX = this.position.x - Math.sin(this.yaw) * dist;
-        const camZ = this.position.z - Math.cos(this.yaw) * dist;
-        const camY = height + this.position.y;
-
-        this.camera.position.set(camX, camY, camZ);
-
-        const lookX = this.position.x + Math.sin(this.yaw) * lookAhead;
-        const lookY = 1.5 + this.position.y;
-        const lookZ = this.position.z + Math.cos(this.yaw) * lookAhead;
-        this.camera.lookAt(lookX, lookY, lookZ);
-    }
-
-    update(deltaTime, input, level) {
-        if (!this.alive) return;
-
-        this.yaw = input.yaw;
-        this.pitch = input.pitch;
-
-        // 移动
-        const move = input.getMoveVector();
-        const speed = input.isRunning() ? CONFIG.player.runSpeed : CONFIG.player.speed;
-
-        // forward = (sin(yaw), 0, cos(yaw))
-        // right = (cos(yaw), 0, -sin(yaw))
-        const forwardX = Math.sin(this.yaw);
-        const forwardZ = Math.cos(this.yaw);
-        const rightX = Math.cos(this.yaw);
-        const rightZ = -Math.sin(this.yaw);
-
-        // move.x: 左右, move.z: 前后（z=-1前进）
-        let nx = this.position.x + (move.x * rightX + -move.z * forwardX) * speed * deltaTime;
-        let nz = this.position.z + (move.x * rightZ + -move.z * forwardZ) * speed * deltaTime;
-
-        // 碰撞检测
-        const radius = CONFIG.player.radius;
-        for (const c of this.colliders) {
-            if (c.type === 'box') {
-                const halfW = c.w / 2 + radius;
-                const halfD = c.d / 2 + radius;
-                if (Math.abs(nx - c.x) < halfW && Math.abs(nz - c.z) < halfD) {
-                    const overlapX = (Math.abs(nx - c.x) - halfW);
-                    const overlapZ = (Math.abs(nz - c.z) - halfD);
-                    if (Math.abs(nx - c.x) > Math.abs(nz - c.z)) {
-                        nx += (nx > c.x ? overlapX : -overlapX);
-                    } else {
-                        nz += (nz > c.z ? overlapZ : -overlapZ);
-                    }
-                }
-            } else if (c.type === 'circle') {
-                const ddx = nx - c.x;
-                const ddz = nz - c.z;
-                const dist = Math.sqrt(ddx * ddx + ddz * ddz);
-                const minDist = c.r + radius;
-                if (dist < minDist && dist > 0.001) {
-                    nx = c.x + (ddx / dist) * minDist;
-                    nz = c.z + (ddz / dist) * minDist;
-                }
-            }
-        }
-
-        const bound = level.size / 2 - 2;
-        nx = Utils.clamp(nx, -bound, bound);
-        nz = Utils.clamp(nz, -bound, bound);
-
-        this.position.x = nx;
-        this.position.z = nz;
-
-        // 更新角色模型
-        this.mesh.position.set(this.position.x, 0, this.position.z);
-        this.mesh.rotation.y = this.yaw;
-
-        // 走路动画
-        if (move.magnitude > 0.1) {
-            this.walkPhase += deltaTime * 10;
-            this.mesh.children.forEach(child => {
-                if (child === this.gunMesh) return;
-            });
-            // 简单上下晃动
-            this.mesh.position.y = Math.abs(Math.sin(this.walkPhase)) * 0.08;
-        } else {
-            this.mesh.position.y = 0;
-        }
-
-        this._updateCamera();
-
-        // 枪口闪光衰减
-        if (this.muzzleFlash.material.opacity > 0) {
-            this.muzzleFlash.material.opacity -= deltaTime * 10;
-            if (this.muzzleFlash.material.opacity <= 0) this.muzzleFlash.material.opacity = 0;
-        }
-
-        // 换弹
-        if (this.isReloading) {
-            this.reloadTimer -= deltaTime;
-            if (this.reloadTimer <= 0) this._finishReload();
-        }
-
-        // 回血
-        if (this.health < this.maxHealth) {
-            this.regenTimer += deltaTime;
-            if (this.regenTimer > CONFIG.player.regenDelay) {
-                this.health = Math.min(this.maxHealth, this.health + CONFIG.player.regenRate * deltaTime);
-            }
-        } else {
-            this.regenTimer = 0;
-        }
-
-        this._updateHUD();
-    }
-
-    takeDamage(amount) {
-        if (!this.alive) return;
-        this.health -= amount;
-        this.lastDamageTime = performance.now();
-        this.regenTimer = 0;
-        if (this.health <= 0) {
-            this.health = 0;
-            this.alive = false;
-            AudioManager.gameOver();
-            Game.state = 'gameover';
-        } else {
-            AudioManager.hurt();
-        }
-    }
-
-    switchWeapon(index) {
-        if (index < 0 || index > 3) return;
-        if (index === this.currentWeapon) return;
-        this.currentWeapon = index;
-        this.isReloading = false;
-        this._updateHUD();
-    }
-
-    reload() {
-        const w = CONFIG.weapons[this.currentWeapon];
-        const ammo = this.weaponAmmo[this.currentWeapon];
-        if (this.isReloading) return;
-        if (ammo.mag >= w.magSize) return;
-        if (ammo.reserve <= 0) return;
-        this.isReloading = true;
-        this.reloadTimer = w.reloadTime;
-        AudioManager.reload();
-        document.getElementById('reloadIndicator').classList.remove('hidden');
-    }
-
-    _finishReload() {
-        const w = CONFIG.weapons[this.currentWeapon];
-        const ammo = this.weaponAmmo[this.currentWeapon];
-        const needed = w.magSize - ammo.mag;
-        const take = Math.min(needed, ammo.reserve);
-        ammo.mag += take;
-        ammo.reserve -= take;
-        this.isReloading = false;
-        document.getElementById('reloadIndicator').classList.add('hidden');
-        this._updateHUD();
-    }
-
-    getAmmo() { return this.weaponAmmo[this.currentWeapon]; }
-    getCurrentWeapon() { return CONFIG.weapons[this.currentWeapon]; }
-    addScore(points) { this.score += points; }
-
-    // 射击：从相机中心射线检测
-    shoot(enemies) {
-        const now = performance.now();
-        const w = this.getCurrentWeapon();
-        const ammo = this.getAmmo();
-
-        if (this.isReloading) return false;
-        if (now - this.lastShotTime < w.fireRate * 1000) return false;
-        if (ammo.mag <= 0) { this.reload(); return false; }
-
-        this.lastShotTime = now;
-        ammo.mag--;
-        this._updateHUD();
-
-        AudioManager.shoot(w.flame ? 100 : 200, w.flame ? 'sawtooth' : 'square');
-
-        // 枪口闪光位置
-        const muzzleOffset = new THREE.Vector3(0.25, 1.2, 0.6);
-        muzzleOffset.applyAxisAngle(new THREE.Vector3(0, 1, 0), this.yaw);
-        this.muzzleFlash.position.set(
-            this.position.x + muzzleOffset.x,
-            muzzleOffset.y,
-            this.position.z + muzzleOffset.z
+        const flash = new THREE.Mesh(
+            new THREE.SphereGeometry(0.16, 6, 6),
+            new THREE.MeshBasicMaterial({ color: 0xffcc55, transparent: true, opacity: 0 })
         );
-        this.muzzleFlash.material.opacity = 1;
+        this.scene.add(flash);
+        this.flashMesh = flash;
 
-        // 射线：从相机中心向前
-        const origin = this.camera.position.clone();
-        const direction = new THREE.Vector3(0, 0, -1);
-        direction.applyQuaternion(this.camera.quaternion);
+        this.mesh = g;
+        this.mesh.position.set(this.position.x, 0, this.position.z);
+        this.scene.add(g);
+    }
 
-        const pellets = w.pellets || 1;
-        for (let p = 0; p < pellets; p++) {
-            const spread = w.spread;
-            const spreadX = (Math.random() - 0.5) * spread;
-            const spreadY = (Math.random() - 0.5) * spread;
-            const dir = direction.clone();
-            const right = new THREE.Vector3(1, 0, 0);
-            right.applyQuaternion(this.camera.quaternion);
-            const up = new THREE.Vector3(0, 1, 0);
-            up.applyQuaternion(this.camera.quaternion);
-            dir.add(right.multiplyScalar(spreadX));
-            dir.add(up.multiplyScalar(spreadY));
-            dir.normalize();
+    get chestY() { return this.position.y + (this.prone ? 0.4 : 1.15); }
 
-            // 火焰喷射：短距离锥形
-            if (w.flame) {
-                this._applyFlame(origin, dir, enemies, w);
-                continue;
-            }
+    reset(point, keepWeapon) {
+        this.position.x = point.x; this.position.y = point.y || 0; this.position.z = point.z;
+        this.vy = 0; this.grounded = true; this.prone = false;
+        this.hpCells = CONFIG.player.maxCells;
+        this.alive = true;
+        this.barrier = 0; this.invuln = 0; this._blink = false;
+        if (!keepWeapon) { this.weapon = 'N'; this.rapid = false; }
+        this.facing = Math.PI;
+        this.mesh.visible = true;
+        this._syncMesh(0);
+    }
 
-            // 射线检测敌人
-            let closestEnemy = null;
-            let closestEnemyDist = w.range;
+    respawn(point) {
+        this.reset(point, false);
+        this.invuln = CONFIG.player.respawnInvuln;
+        this._blink = true;
+    }
 
-            for (const enemy of enemies) {
-                if (!enemy.alive) continue;
-                const hit = this._raycastEnemy(origin, dir, enemy);
-                if (hit && hit.dist < closestEnemyDist) {
-                    closestEnemy = enemy;
-                    closestEnemyDist = hit.dist;
-                }
-            }
-
-            // 射线检测场景碰撞体
-            let sceneDist = w.range;
-            for (const c of this.colliders) {
-                const hit = this._raycastCollider(origin, dir, c);
-                if (hit && hit < sceneDist) sceneDist = hit;
-            }
-
-            // 地面
-            const groundDist = origin.y > 0 ? origin.y / Math.abs(dir.y + 0.001) : w.range;
-            if (Math.abs(dir.y) > 0.001 && groundDist < sceneDist) {
-                sceneDist = Math.min(sceneDist, groundDist);
-            }
-
-            let endPoint;
-            if (closestEnemy && closestEnemyDist <= sceneDist) {
-                closestEnemy.takeDamage(w.damage);
-                endPoint = origin.clone().add(dir.clone().multiplyScalar(closestEnemyDist));
-                closestEnemy._showHitEffect(endPoint);
-            } else {
-                endPoint = origin.clone().add(dir.clone().multiplyScalar(sceneDist));
-            }
-
-            this._createTracer(origin, endPoint, w.color);
+    takeDamage(cells) {
+        if (!this.alive || this.invuln > 0 || this.barrier > 0) return false;
+        this.hpCells -= cells;
+        this.invuln = CONFIG.player.hitInvuln;
+        AudioManager.hurt();
+        if (this.onDamaged) this.onDamaged(this.hpCells);
+        if (this.hpCells <= 0) {
+            this.hpCells = 0;
+            this.alive = false;
+            if (this.onDeath) this.onDeath();
         }
-
         return true;
     }
 
-    _applyFlame(origin, dir, enemies, w) {
-        // 火焰：短距离，锥形范围伤害
-        const flameLength = w.range;
-        const flameRadius = 1.5;
-        const endPoint = origin.clone().add(dir.clone().multiplyScalar(flameLength));
+    heal(n) {
+        this.hpCells = Math.min(CONFIG.player.maxCells, this.hpCells + n);
+    }
 
-        for (const enemy of enemies) {
-            if (!enemy.alive) continue;
-            const enemyPos = new THREE.Vector3(enemy.position.x, enemy.position.y + 1, enemy.position.z);
-            const toEnemy = enemyPos.clone().sub(origin);
-            const projLen = toEnemy.dot(dir);
-            if (projLen < 0 || projLen > flameLength) continue;
-            const perpDist = toEnemy.length() - projLen;
-            if (perpDist > flameRadius + enemy.radius) continue;
-            // 随机伤害（火焰是多段）
-            enemy.takeDamage(w.damage * Utils.randomRange(0.5, 1.5));
+    applyPickup(letter) {
+        AudioManager.pickup();
+        if (letter === 'R') this.rapid = true;
+        else if (letter === 'B') this.barrier = 8;
+        else if (letter === '+') this.heal(1);
+        else if (WEAPON_DATA[letter]) this.weapon = letter;
+    }
+
+    update(dt, input, level, aimYaw, aimingOrShooting) {
+        if (!this.alive) return;
+        if (this.invuln > 0) this.invuln -= dt;
+        if (this.barrier > 0) { this.barrier -= dt; if (this.barrier < 0) this.barrier = 0; }
+        this.shieldMesh.visible = this.barrier > 0;
+        if (this.fireTimer > 0) this.fireTimer -= dt;
+        if (this._flashT > 0) { this._flashT -= dt; this.flashMesh.material.opacity = Math.max(0, this._flashT / 0.05); }
+
+        // 复活无敌闪烁
+        if (this._blink) {
+            if (this.invuln <= 0) { this._blink = false; this.mesh.visible = true; }
+            else this.mesh.visible = Math.floor(performance.now() / 90) % 2 === 0;
         }
 
-        this._createTracer(origin, endPoint, 0xff4400);
+        this.prone = !!input.isProne() && this.grounded;
+
+        // 移动（相对镜头朝向）
+        const move = input.getMoveVector();
+        const moving = move.magnitude > 0.1;
+        let speed = CONFIG.player.walkSpeed;
+        if (this.prone) speed = CONFIG.player.proneSpeed;
+        else if (input.isRunning() && !aimingOrShooting) speed = CONFIG.player.runSpeed;
+
+        const sin = Math.sin(aimYaw), cos = Math.cos(aimYaw);
+        // forward=(sin,cos)，right=(-cos,sin)（与镜头约定一致）
+        const wx = (move.x * -cos + -move.z * sin);
+        const wz = (move.x * sin + -move.z * cos);
+        let nx = this.position.x + wx * speed * dt;
+        let nz = this.position.z + wz * speed * dt;
+
+        // 走廊边界
+        const halfW = level.width / 2 - 1.1;
+        nx = Utils.clamp(nx, -halfW, halfW);
+        nz = Utils.clamp(nz, -level.length - 14, 30);
+
+        // 水平碰撞
+        const resolved = this._resolveHorizontal(nx, nz, level);
+        nx = resolved.x; nz = resolved.z;
+        this.position.x = nx; this.position.z = nz;
+
+        // 地面/跳跃
+        const support = level.getSupportY(nx, nz, this.position.y);
+        if (this.grounded) {
+            if (input.consumeJump()) {
+                this.vy = CONFIG.player.jumpVelocity;
+                this.grounded = false;
+                this._flip = 0.01;
+                AudioManager.jump();
+            } else if (support < this.position.y - 1.5) {
+                this.grounded = false; // 走下高台边缘
+                this.vy = 0;
+            } else {
+                this.position.y = support;
+            }
+        }
+        if (!this.grounded) {
+            this.vy -= CONFIG.player.gravity * dt;
+            this.position.y += this.vy * dt;
+            if (this._flip > 0) this._flip += dt * 5.2; // 翻跟头进度
+            const s2 = level.getSupportY(nx, nz, this.position.y);
+            if (this.position.y <= s2) {
+                this.position.y = s2;
+                this.vy = 0;
+                this.grounded = true;
+                this._flip = 0;
+            }
+        }
+
+        // 朝向：瞄准/开火锁镜头方向，否则朝移动方向
+        if (aimingOrShooting) {
+            this.facing = aimYaw;
+        } else if (moving) {
+            const target = Math.atan2(wx, wz);
+            let diff = target - this.facing;
+            while (diff > Math.PI) diff -= Math.PI * 2;
+            while (diff < -Math.PI) diff += Math.PI * 2;
+            this.facing += diff * Math.min(1, dt * 14);
+        }
+
+        // 动画相位
+        if (moving && this.grounded) this.walkPhase += dt * (speed * 1.35);
+        this._syncMesh(dt, moving);
     }
 
-    _raycastEnemy(origin, dir, enemy) {
-        const enemyPos = new THREE.Vector3(enemy.position.x, enemy.position.y + 1, enemy.position.z);
-        const radius = enemy.radius;
-        const oc = origin.clone().sub(enemyPos);
-        const a = dir.dot(dir);
-        const b = 2 * oc.dot(dir);
-        const c = oc.dot(oc) - radius * radius;
-        const disc = b * b - 4 * a * c;
-        if (disc < 0) return null;
-        const t = (-b - Math.sqrt(disc)) / (2 * a);
-        if (t < 0) return null;
-        return { dist: t };
-    }
-
-    _raycastCollider(origin, dir, c) {
-        if (c.type === 'box') {
-            const minX = c.x - c.w / 2, maxX = c.x + c.w / 2;
-            const minZ = c.z - c.d / 2, maxZ = c.z + c.d / 2;
-            const height = c.h || CONFIG.level.wallHeight;
-            const minY = 0, maxY = height;
-
-            let tmin = -Infinity, tmax = Infinity;
-            for (let i = 0; i < 3; i++) {
-                const o = i === 0 ? origin.x : (i === 1 ? origin.y : origin.z);
-                const d = i === 0 ? dir.x : (i === 1 ? dir.y : dir.z);
-                const lo = i === 0 ? minX : (i === 1 ? minY : minZ);
-                const hi = i === 0 ? maxX : (i === 1 ? maxY : maxZ);
-                if (Math.abs(d) < 0.0001) {
-                    if (o < lo || o > hi) return Infinity;
-                } else {
-                    let t1 = (lo - o) / d;
-                    let t2 = (hi - o) / d;
-                    if (t1 > t2) [t1, t2] = [t2, t1];
-                    tmin = Math.max(tmin, t1);
-                    tmax = Math.min(tmax, t2);
-                    if (tmin > tmax) return Infinity;
+    _resolveHorizontal(nx, nz, level) {
+        const radius = this.radius;
+        const feetY = this.position.y;
+        const bodyTop = feetY + (this.prone ? CONFIG.player.proneHeight : CONFIG.player.height);
+        for (const c of level.colliders) {
+            if (c.disabled || c.noCollide) continue;
+            const cBot = c.y0 || 0, cTop = cBot + (c.h || 6);
+            if (cTop <= feetY + 0.55) continue;          // 可踩/可跨
+            if (cBot >= bodyTop - 0.15) continue;        // 在头顶上方
+            if (c.type === 'box') {
+                const hw = c.w / 2 + radius, hd = c.d / 2 + radius;
+                const dx = nx - c.x, dz = nz - c.z;
+                if (Math.abs(dx) < hw && Math.abs(dz) < hd) {
+                    const penX = hw - Math.abs(dx), penZ = hd - Math.abs(dz);
+                    if (penX < penZ) nx = c.x + (dx >= 0 ? hw : -hw);
+                    else nz = c.z + (dz >= 0 ? hd : -hd);
+                }
+            } else if (c.type === 'circle') {
+                const dx = nx - c.x, dz = nz - c.z;
+                const d2 = dx * dx + dz * dz, minD = c.r + radius;
+                if (d2 < minD * minD && d2 > 1e-6) {
+                    const d = Math.sqrt(d2);
+                    nx = c.x + (dx / d) * minD;
+                    nz = c.z + (dz / d) * minD;
                 }
             }
-            return tmin > 0 ? tmin : Infinity;
-        } else if (c.type === 'circle') {
-            const ox = origin.x, oz = origin.z;
-            const dx = dir.x, dz = dir.z;
-            const fx = ox - c.x, fz = oz - c.z;
-            const a = dx * dx + dz * dz;
-            const b = 2 * (fx * dx + fz * dz);
-            const cc = fx * fx + fz * fz - c.r * c.r;
-            const disc = b * b - 4 * a * cc;
-            if (disc < 0) return Infinity;
-            const t = (-b - Math.sqrt(disc)) / (2 * a);
-            if (t < 0) return Infinity;
-            const hitY = origin.y + dir.y * t;
-            if (hitY < 0 || hitY > (c.h || CONFIG.level.wallHeight)) return Infinity;
-            return t;
         }
-        return Infinity;
+        return { x: nx, z: nz };
     }
 
-    _createTracer(from, to, color) {
-        const geo = new THREE.BufferGeometry().setFromPoints([from, to]);
-        const mat = new THREE.LineBasicMaterial({ color: color || 0xffff00, transparent: true, opacity: 0.6 });
-        const line = new THREE.Line(geo, mat);
-        this.scene.add(line);
-        // 自动清理
-        setTimeout(() => { if (this.scene) this.scene.remove(line); }, 200);
+    _syncMesh(dt, moving) {
+        this.mesh.position.set(this.position.x, this.position.y, this.position.z);
+        this.mesh.rotation.y = this.facing;
+        const body = this.bodyGroup;
+        if (!this.grounded && this._flip > 0) {
+            body.rotation.x = -Math.min(this._flip, 1) * Math.PI * 2;
+            body.position.y = 0;
+        } else if (this.prone) {
+            body.rotation.x = 1.25;
+            body.position.y = -0.55;
+        } else {
+            body.rotation.x = 0;
+            body.position.y = (moving && this.grounded) ? Math.abs(Math.sin(this.walkPhase)) * 0.07 : 0;
+        }
+        // 腿摆动（绕髋近似：前后摆用 rotation.x 作用在单腿网格上会绕其中心，可接受的低模动画）
+        const swing = (moving && this.grounded && !this.prone) ? Math.sin(this.walkPhase) * 0.55 : 0;
+        this.legL.rotation.x = swing;
+        this.legR.rotation.x = -swing;
+        // 右臂瞄准姿势
+        this.armRGroup.rotation.x = this.prone ? -1.2 : -1.45;
     }
 
-    _updateHUD() {
-        const healthPct = (this.health / this.maxHealth) * 100;
-        document.getElementById('healthFill').style.width = healthPct + '%';
-        document.getElementById('healthValue').textContent = Math.ceil(this.health);
-        const w = this.getCurrentWeapon();
-        const ammo = this.getAmmo();
-        document.getElementById('ammoDisplay').innerHTML = `${ammo.mag} <span class="ammo-reserve">/ ${ammo.reserve}</span>`;
-        document.getElementById('weaponName').textContent = w.name;
-        document.getElementById('scoreValue').textContent = this.score;
+    getMuzzleWorld(out) {
+        const y = this.position.y + (this.prone ? 0.35 : 1.3);
+        const fx = Math.sin(this.facing), fz = Math.cos(this.facing);
+        out.set(this.position.x + fx * 0.55, y, this.position.z + fz * 0.55);
+        return out;
+    }
+
+    tryShoot(projectiles, aimPoint) {
+        if (!this.alive || this.fireTimer > 0) return false;
+        const w = WEAPON_DATA[this.weapon];
+        this.fireTimer = w.fireRate * (this.rapid ? RAPID_FACTOR : 1);
+        const muzzle = this.getMuzzleWorld(new THREE.Vector3());
+        const baseDir = aimPoint.clone().sub(muzzle);
+        if (baseDir.lengthSq() < 0.01) baseDir.set(Math.sin(this.facing), 0, Math.cos(this.facing));
+        baseDir.normalize();
+        const right = new THREE.Vector3(-baseDir.z, 0, baseDir.x).normalize();
+        const up = new THREE.Vector3().crossVectors(baseDir, right).normalize();
+        for (let i = 0; i < w.pellets; i++) {
+            const dir = baseDir.clone();
+            if (w.pellets > 1) {
+                // S 散射：扇形均布 + 少量随机
+                const t = (i / (w.pellets - 1) - 0.5);
+                dir.addScaledVector(right, t * w.spread * 2.2);
+                dir.addScaledVector(up, (Math.random() - 0.5) * w.spread * 0.4);
+            } else if (w.spread > 0) {
+                dir.addScaledVector(right, (Math.random() - 0.5) * w.spread * 2);
+                dir.addScaledVector(up, (Math.random() - 0.5) * w.spread * 2);
+            }
+            dir.normalize();
+            projectiles.spawnPlayerBullet(muzzle, dir, w);
+        }
+        this.flashMesh.position.copy(muzzle).addScaledVector(baseDir, 0.25);
+        this.flashMesh.material.opacity = 0.9;
+        this._flashT = 0.05;
+        AudioManager.shoot(this.weapon);
+        return true;
     }
 
     destroy() {
-        if (this.mesh) this.scene.remove(this.mesh);
-        if (this.muzzleFlash) this.scene.remove(this.muzzleFlash);
+        if (this.mesh) { this.scene.remove(this.mesh); Utils.disposeObject(this.mesh); }
+        if (this.flashMesh) { this.scene.remove(this.flashMesh); Utils.disposeObject(this.flashMesh); }
     }
 }

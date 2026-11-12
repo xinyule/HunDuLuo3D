@@ -1,613 +1,566 @@
 /**
- * 关卡系统 — 魂斗罗8关场景复刻
- * 1.丛林 2.瀑布 3.基地 4.桥梁 5.基地2 6.洞窟 7.最终基地 8.最终决战
+ * 关卡 — 线性走廊推进（修旧版方形竞技场随机撒怪）
+ * 玩家从 z=26 向 -Z 推进至 length 米处 Boss 竞技段；
+ * 敌人按路段触发分批生成；基地关有电网门+感应器， 能量区有火焰喷口，
+ * 仓库有尖刺矿车，瀑布关有台阶攀爬+落石，雪原有装甲车中Boss。
  */
-class Level {
-    constructor(scene, levelData, levelIndex) {
+class GateSensor {
+    constructor(scene, x, y, z, onOpen, onScore) {
+        this.hp = 130; this.alive = true;
+        this.hitX = x; this.hitY = y; this.hitZ = z; this.hitR = 0.85;
+        this.onOpen = onOpen; this.onScore = onScore;
+        const g = new THREE.Group();
+        const ring = new THREE.Mesh(new THREE.TorusGeometry(0.62, 0.1, 8, 18),
+            new THREE.MeshLambertMaterial({ color: 0x888888 }));
+        g.add(ring);
+        this.core = new THREE.Mesh(new THREE.SphereGeometry(0.42, 10, 8),
+            new THREE.MeshBasicMaterial({ color: 0xff2222 }));
+        g.add(this.core);
+        g.position.set(x, y, z);
+        this.mesh = g;
+        scene.add(g);
         this.scene = scene;
-        this.data = levelData;
-        this.index = levelIndex;
-        this.size = CONFIG.level.size;
-        this.enemies = [];
-        this.colliders = [];
-        this.objects = []; // 可破坏/交互物体
-        this.decor = [];   // 装饰物
-        this.lights = [];
+    }
+    onHit(dmg) {
+        if (!this.alive) return;
+        this.hp -= dmg;
+        this.core.scale.setScalar(1 + Math.max(0, this.hp / 130) * 0.15);
+        if (this.hp <= 0) {
+            this.alive = false;
+            this.onScore(300);
+            AudioManager.gateOpen();
+            this.onOpen();
+        }
+    }
+    destroy() { if (this.mesh) { this.scene.remove(this.mesh); Utils.disposeObject(this.mesh); } }
+}
 
-        // 关卡完成
-        this.killedCount = 0;
-        this.totalEnemies = 0;
-        this.completed = false;
+class Level {
+    constructor(scene, data, index, ctx) {
+        this.scene = scene;
+        this.data = data;
+        this.index = index;
+        this.ctx = ctx; // { projectiles, onScore, onPickup, onCheckpoint, onBossActivated, onBossDefeated }
+        this.width = data.width;
+        this.length = data.length;
+        this.colliders = [];
+        this.enemies = [];
+        this.decor = [];
+        this.objects = [];
+        this.lights = [];
+        this.sensors = [];
+        this.gates = [];
+        this.flames = [];
+        this.carts = [];
+        this.rocks = [];
+        this.boss = null;
+        this.bossActivated = false;
+        this.time = 0;
+        this._rockTimer = 2.5;
+        this._healDropped = false;
+
+        this.pickups = new PickupSystem(scene, { onPickup: ctx.onPickup, onScore: ctx.onScore });
+        this.enemyCtx = { projectiles: ctx.projectiles, onScore: ctx.onScore };
+
+        // 触发队列（按推进米数）
+        this.spawnQueue = data.spawns.map((s) => ({ dist: s[0], type: s[1], x: s[2], done: false }));
+        if (data.midTank) this.spawnQueue.push({ dist: data.midTank, type: 'tank', x: 0, done: false });
+        this.spawnQueue.sort((a, b) => a.dist - b.dist);
+        this.falconQueue = (data.falcons || []).map((d, i) => ({ dist: d, letter: (data.letters || ['S'])[i % (data.letters || ['S']).length], done: false }));
+
+        // 检查点：起点 + 每道门后 + Boss 竞技段入口
+        this.checkpoints = [{ x: 0, y: 0, z: 26 }];
+        (data.gates || []).forEach((gd) => this.checkpoints.push({ x: 0, y: 0, z: 26 - gd - 4, dist: gd + 4 }));
+        this.checkpoints.push({ x: 0, y: 0, z: 26 - (data.length - 44), dist: data.length - 44 });
+        this._cpIndex = 0;
 
         this._build();
     }
 
+    playerDist(player) { return 26 - player.position.z; }
+
+    getSupportY(x, z, fromY) {
+        let best = 0;
+        for (const c of this.colliders) {
+            if (c.disabled || c.noCollide) continue;
+            const top = (c.y0 || 0) + (c.h || 6);
+            if (top > fromY + 0.55 || top <= best) continue;
+            if (c.type === 'box') {
+                if (Math.abs(x - c.x) <= c.w / 2 + 0.05 && Math.abs(z - c.z) <= c.d / 2 + 0.05) best = top;
+            } else if (c.type === 'circle') {
+                const dx = x - c.x, dz = z - c.z;
+                if (dx * dx + dz * dz <= (c.r + 0.05) ** 2) best = top;
+            }
+        }
+        return best;
+    }
+
+    // ---------------- 建造 ----------------
     _build() {
         const env = this.data.env;
-
-        // 环境光
-        const ambient = new THREE.AmbientLight(0xffffff, 0.4);
-        this.scene.add(ambient);
-        this.lights.push(ambient);
-
-        // 方向光（太阳）
-        const sun = new THREE.DirectionalLight(0xffffff, 0.6);
-        sun.position.set(50, 100, 50);
-        this.scene.add(sun);
-        this.lights.push(sun);
-
-        // 天空盒颜色
+        const ambient = new THREE.AmbientLight(0xffffff, 0.5);
+        this.scene.add(ambient); this.lights.push(ambient);
+        const sun = new THREE.DirectionalLight(env.sun, 0.75);
+        sun.position.set(30, 80, 40);
+        this.scene.add(sun); this.lights.push(sun);
         this.scene.background = new THREE.Color(env.bg);
         this.scene.fog = new THREE.FogExp2(env.fog, env.fogDensity);
 
-        // 地面
-        this._buildGround();
+        this._buildGroundAndWalls();
+        const theme = this.data.theme;
+        if (theme === 'jungle') this._themeJungle();
+        else if (theme === 'base' || theme === 'base2') this._themeBase();
+        else if (theme === 'waterfall') this._themeWaterfall();
+        else if (theme === 'snow') this._themeSnow();
+        else if (theme === 'energy') this._themeEnergy();
+        else if (theme === 'hangar') this._themeHangar();
+        else if (theme === 'alien') this._themeAlien();
 
-        // 根据布局生成场景
-        const layout = this.data.layout;
-        switch (layout) {
-            case 'jungle':     this._buildJungle(); break;
-            case 'waterfall':  this._buildWaterfall(); break;
-            case 'base':       this._buildBase(); break;
-            case 'bridge':     this._buildBridge(); break;
-            case 'base2':      this._buildBase2(); break;
-            case 'cave':       this._buildCave(); break;
-            case 'finalbase':  this._buildFinalbase(); break;
-            case 'finalarena': this._buildFinalarena(); break;
-            default:           this._buildJungle(); break;
-        }
+        if (this.data.gates) this.data.gates.forEach((gd) => this._buildGate(gd));
+        if (this.data.flames) this.data.flames.forEach((fd, i) => this._buildFlame(fd, i));
+        if (this.data.carts) this.data.carts.forEach((cd, i) => this._buildCart(cd, i));
 
-        // 生成敌人
-        this._spawnEnemies();
-
-        // 更新总数
-        this.totalEnemies = this.enemies.length;
-        document.getElementById('enemyTotal').textContent = this.totalEnemies;
+        // Boss（竞技段尽头）
+        const bossZ = -this.length + 10;
+        const bossY = this.getSupportY(0, bossZ, 999);
+        const bossCtx = {
+            projectiles: this.ctx.projectiles,
+            onScore: this.ctx.onScore,
+            onDefeated: () => this.ctx.onBossDefeated(),
+            spawnMinion: (type, x, z) => this._spawnEnemy(type, x, z),
+        };
+        this.boss = new Boss(this.scene, this.data.boss, 0, bossY, bossZ, bossCtx);
+        this.bossZ = bossZ;
+        this.bossY = bossY;
     }
 
-    _buildGround() {
-        const geo = new THREE.PlaneGeometry(this.size, this.size);
-        const mat = new THREE.MeshLambertMaterial({ color: this.data.env.ground });
-        const ground = new THREE.Mesh(geo, mat);
+    _addCollider(c) { this.colliders.push(c); return c; }
+    _mesh(geo, color, x, y, z, opts) {
+        const m = new THREE.Mesh(geo, new THREE.MeshLambertMaterial(Object.assign({ color }, (opts && opts.mat) || {})));
+        m.position.set(x, y, z);
+        if (opts && opts.rot) m.rotation.set(opts.rot[0] || 0, opts.rot[1] || 0, opts.rot[2] || 0);
+        this.scene.add(m);
+        (opts && opts.list ? this[opts.list] : this.decor).push(m);
+        return m;
+    }
+    _box(x, z, w, d, h, color, opts) {
+        opts = opts || {};
+        const y0 = opts.y0 || 0;
+        const m = this._mesh(new THREE.BoxGeometry(w, h, d), color, x, y0 + h / 2, z, opts);
+        if (!opts.noCollider) this._addCollider({ type: 'box', x, z, w, d, h, y0 });
+        return m;
+    }
+
+    _buildGroundAndWalls() {
+        const env = this.data.env;
+        const L = this.length, W = this.width;
+        const centerZ = 26 - L / 2;
+        const ground = new THREE.Mesh(new THREE.PlaneGeometry(W + 46, L + 90),
+            new THREE.MeshLambertMaterial({ color: env.ground }));
         ground.rotation.x = -Math.PI / 2;
-        this.scene.add(ground);
-        this.decor.push(ground);
+        ground.position.set(0, -0.02, centerZ);
+        this.scene.add(ground); this.decor.push(ground);
 
-        // 地面网格纹理（简单线条）
-        const gridHelper = new THREE.GridHelper(this.size, 50, 0x333333, 0x222222);
-        gridHelper.position.y = 0.01;
-        this.scene.add(gridHelper);
-        this.decor.push(gridHelper);
+        // 两侧 containment 墙（碰撞），外观由主题装饰覆盖
+        this._addCollider({ type: 'box', x: -(W / 2 + 0.6), z: centerZ, w: 1.2, d: L + 60, h: 30, y0: 0 });
+        this._addCollider({ type: 'box', x: (W / 2 + 0.6), z: centerZ, w: 1.2, d: L + 60, h: 30, y0: 0 });
+        this._addCollider({ type: 'box', x: 0, z: 34, w: W + 10, d: 1.2, h: 30, y0: 0 }); // 身后
+        this._addCollider({ type: 'box', x: 0, z: -L - 2, w: W + 10, d: 1.2, h: 30, y0: 0 }); // 关底
     }
 
-    // ===== 通用辅助方法 =====
-
-    _addWall(x, z, w, d, h, color) {
-        h = h || CONFIG.level.wallHeight;
-        color = color || 0x555555;
-        const geo = new THREE.BoxGeometry(w, h, d);
-        const mat = new THREE.MeshLambertMaterial({ color });
-        const wall = new THREE.Mesh(geo, mat);
-        wall.position.set(x, h / 2, z);
-        this.scene.add(wall);
-        this.colliders.push({ type: 'box', x, z, w, d, h });
-        this.objects.push(wall);
-        return wall;
-    }
-
-    _addBox(x, z, w, d, h, color) {
-        h = h || 1.5;
-        color = color || 0x886644;
-        const geo = new THREE.BoxGeometry(w, h, d);
-        const mat = new THREE.MeshLambertMaterial({ color });
-        const box = new THREE.Mesh(geo, mat);
-        box.position.set(x, h / 2, z);
-        this.scene.add(box);
-        this.colliders.push({ type: 'box', x, z, w, d, h });
-        this.objects.push(box);
-        return box;
-    }
-
-    _addTree(x, z) {
-        const trunkMat = new THREE.MeshLambertMaterial({ color: 0x4a3020 });
-        const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.3, 3, 6), trunkMat);
-        trunk.position.set(x, 1.5, z);
-        this.scene.add(trunk);
-
-        const leafMat = new THREE.MeshLambertMaterial({ color: 0x2a5a1a });
-        const leaves = new THREE.Mesh(new THREE.SphereGeometry(1.5, 8, 8), leafMat);
-        leaves.position.set(x, 3.5, z);
-        this.scene.add(leaves);
-
-        this.colliders.push({ type: 'circle', x, z, r: 0.5, h: 3 });
-        this.decor.push(trunk, leaves);
-    }
-
-    _addBuilding(x, z, w, d, h, color) {
-        h = h || 4;
-        color = color || 0x666666;
-        const geo = new THREE.BoxGeometry(w, h, d);
-        const mat = new THREE.MeshLambertMaterial({ color });
-        const b = new THREE.Mesh(geo, mat);
-        b.position.set(x, h / 2, z);
-        this.scene.add(b);
-        this.colliders.push({ type: 'box', x, z, w, d, h });
-        this.objects.push(b);
-        return b;
-    }
-
-    _addCrate(x, z, size, color) {
-        size = size || 1.0;
-        color = color || 0xaa7744;
-        const geo = new THREE.BoxGeometry(size, size, size);
-        const mat = new THREE.MeshLambertMaterial({ color });
-        const c = new THREE.Mesh(geo, mat);
-        c.position.set(x, size / 2, z);
-        this.scene.add(c);
-        this.colliders.push({ type: 'box', x, z, w: size, d: size, h: size });
-        this.objects.push(c);
-        return c;
-    }
-
-    _addBarrel(x, z, color) {
-        color = color || 0xcc4422;
-        const barrel = new THREE.Mesh(
-            new THREE.CylinderGeometry(0.4, 0.4, 1.2, 8),
-            new THREE.MeshLambertMaterial({ color })
-        );
-        barrel.position.set(x, 0.6, z);
-        this.scene.add(barrel);
-        this.colliders.push({ type: 'circle', x, z, r: 0.5, h: 1.2 });
-        this.objects.push(barrel);
-        return barrel;
-    }
-
-    _addRock(x, z, scale) {
-        scale = scale || 1;
-        const rock = new THREE.Mesh(
-            new THREE.DodecahedronGeometry(scale, 0),
-            new THREE.MeshLambertMaterial({ color: 0x6a6a6a, flatShading: true })
-        );
-        rock.position.set(x, scale * 0.4, z);
-        rock.rotation.set(Math.random(), Math.random(), Math.random());
-        this.scene.add(rock);
-        this.colliders.push({ type: 'circle', x, z, r: scale * 0.6, h: scale });
-        this.decor.push(rock);
-        return rock;
-    }
-
-    _addPillar(x, z, h, color) {
-        h = h || 6;
-        color = color || 0x554433;
-        const pillar = new THREE.Mesh(
-            new THREE.CylinderGeometry(0.4, 0.5, h, 8),
-            new THREE.MeshLambertMaterial({ color })
-        );
-        pillar.position.set(x, h / 2, z);
-        this.scene.add(pillar);
-        this.colliders.push({ type: 'circle', x, z, r: 0.5, h });
-        this.decor.push(pillar);
-        return pillar;
-    }
-
-    // ===== 第1关: 丛林 =====
-    _buildJungle() {
-        // 大量树木 — 魂斗罗风格的密林
-        for (let i = 0; i < 40; i++) {
-            const x = Utils.randomRange(-this.size/2 + 5, this.size/2 - 5);
-            const z = Utils.randomRange(-this.size/2 + 5, this.size/2 - 5);
-            // 避开中央通道
-            if (Math.abs(x) < 5 && z > -10 && z < 20) continue;
-            this._addTree(x, z);
+    _scatterCover(rand, count, maker) {
+        for (let i = 0; i < count; i++) {
+            const dist = 24 + rand() * (this.length - 55);
+            const x = (rand() > 0.5 ? 1 : -1) * (3.5 + rand() * (this.width / 2 - 4.5));
+            maker(x, 26 - dist, rand);
         }
-        // 灌木丛/石头
-        for (let i = 0; i < 15; i++) {
-            this._addRock(
-                Utils.randomRange(-this.size/2 + 5, this.size/2 - 5),
-                Utils.randomRange(-this.size/2 + 5, this.size/2 - 5),
-                Utils.randomRange(0.5, 1.5)
-            );
-        }
-        // 木箱
-        for (let i = 0; i < 10; i++) {
-            this._addCrate(Utils.randomRange(-30, 30), Utils.randomRange(-30, 30));
-        }
-        // 外围栅栏
-        this._addWall(-55, 0, 0.5, 110, 2, 0x5a4a30);
-        this._addWall(55, 0, 0.5, 110, 2, 0x5a4a30);
-        this._addWall(0, -55, 110, 0.5, 2, 0x5a4a30);
-        this._addWall(0, 55, 110, 0.5, 2, 0x5a4a30);
     }
 
-    // ===== 第2关: 瀑布 =====
-    _buildWaterfall() {
-        // 瀑布水体 — 大块蓝色平面
-        const waterGeo = new THREE.PlaneGeometry(30, 50);
-        const waterMat = new THREE.MeshLambertMaterial({
-            color: 0x2a5a8a,
-            transparent: true,
-            opacity: 0.8,
+    _tree(x, z, rand, snow) {
+        const trunk = this._mesh(new THREE.CylinderGeometry(0.22, 0.32, 3, 6), 0x4a3020, x, 1.5, z);
+        const leafColor = snow ? 0xdfe9f2 : 0x2a5a1a;
+        const leaves = this._mesh(new THREE.ConeGeometry(1.7, 3.6, 7), leafColor, x, 4.4, z);
+        leaves.rotation.y = rand() * 3;
+        this._addCollider({ type: 'circle', x, z, r: 0.5, h: 3 });
+        return [trunk, leaves];
+    }
+
+    _themeJungle() {
+        const rand = Utils.seededRandom(1101 + this.index * 77);
+        const W = this.width, L = this.length;
+        for (let d = 6; d < L + 20; d += 7) {
+            [-1, 1].forEach((s) => {
+                if (rand() > 0.25) this._tree(s * (W / 2 + 2.4 + rand() * 3), 26 - d, rand, false);
+            });
+        }
+        this._scatterCover(rand, 12, (x, z) => this._box(x, z, 1.1, 1.1, 1.1, 0x8a6a3a));
+        this._scatterCover(rand, 8, (x, z) => {
+            const rock = this._mesh(new THREE.DodecahedronGeometry(0.9, 0), 0x6a6a5a, x, 0.4, z, { mat: { flatShading: true } });
+            rock.rotation.set(rand() * 3, rand() * 3, 0);
+            this._addCollider({ type: 'circle', x, z, r: 0.75, h: 0.9 });
         });
-        const water = new THREE.Mesh(waterGeo, waterMat);
-        water.rotation.x = -Math.PI / 2;
-        water.position.set(-10, 0.05, 0);
-        this.scene.add(water);
-        this.decor.push(water);
-
-        // 瀑布后方的水帘
-        const curtainGeo = new THREE.PlaneGeometry(30, 20);
-        const curtainMat = new THREE.MeshLambertMaterial({
-            color: 0x6ab0ff,
-            transparent: true,
-            opacity: 0.5,
-            side: THREE.DoubleSide,
-        });
-        const curtain = new THREE.Mesh(curtainGeo, curtainMat);
-        curtain.position.set(-25, 10, 0);
-        this.scene.add(curtain);
-        this.decor.push(curtain);
-
-        // 岩石群
-        for (let i = 0; i < 20; i++) {
-            const side = Math.random() > 0.3 ? 1 : -1;
-            this._addRock(
-                side * Utils.randomRange(5, 50),
-                Utils.randomRange(-25, 25),
-                Utils.randomRange(1, 3)
-            );
-        }
-
-        // 石桥
-        this._addBox(0, 0, 4, 30, 0.5, 0x7a6a50);
-
-        // 树木在远处
-        for (let i = 0; i < 15; i++) {
-            const side = Math.random() > 0.5 ? 1 : -1;
-            this._addTree(side * Utils.randomRange(35, 50), Utils.randomRange(-40, 40));
-        }
-
-        // 木箱
-        for (let i = 0; i < 8; i++) {
-            this._addCrate(Utils.randomRange(-30, 30), Utils.randomRange(-30, 30));
-        }
-
-        // 外围栅栏
-        this._addWall(-55, 0, 0.5, 110, 2, 0x4a3a20);
-        this._addWall(55, 0, 0.5, 110, 2, 0x4a3a20);
-        this._addWall(0, -55, 110, 0.5, 2, 0x4a3a20);
-        this._addWall(0, 55, 110, 0.5, 2, 0x4a3a20);
-    }
-
-    // ===== 第3关: 基地 =====
-    _buildBase() {
-        // 营房
-        this._addBuilding(-20, -15, 12, 8, 4, 0x6a5a30);
-        this._addBuilding(20, 15, 10, 10, 4, 0x6a5a30);
-        this._addBuilding(0, -25, 8, 8, 4, 0x5a4a20);
-
-        // 围墙
-        this._addWall(-55, 0, 0.5, 110, 4, 0x666666);
-        this._addWall(55, 0, 0.5, 110, 4, 0x666666);
-        this._addWall(0, -55, 110, 0.5, 4, 0x666666);
-        this._addWall(0, 55, 110, 0.5, 4, 0x666666);
-
-        // 哨塔（4个角落）
-        for (let i = 0; i < 4; i++) {
-            const x = (i % 2 === 0 ? -45 : 45);
-            const z = (i < 2 ? -45 : 45);
-            this._addBuilding(x, z, 4, 4, 6, 0x444444);
-        }
-
-        // 油桶
-        for (let i = 0; i < 8; i++) {
-            this._addBarrel(Utils.randomRange(-40, 40), Utils.randomRange(-40, 40));
-        }
-
-        // 木箱
-        for (let i = 0; i < 12; i++) {
-            this._addCrate(Utils.randomRange(-40, 40), Utils.randomRange(-40, 40));
-        }
-    }
-
-    // ===== 第4关: 桥梁 =====
-    _buildBridge() {
-        // 桥面
-        const bridgeGeo = new THREE.BoxGeometry(10, 0.3, 100);
-        const bridgeMat = new THREE.MeshLambertMaterial({ color: 0x7a5a30 });
-        const bridge = new THREE.Mesh(bridgeGeo, bridgeMat);
-        bridge.position.set(0, 0.15, 0);
-        this.scene.add(bridge);
-        this.decor.push(bridge);
-
-        // 桥栏杆
-        this._addWall(-5, 0, 0.2, 100, 1.5, 0x5a4020);
-        this._addWall(5, 0, 0.2, 100, 1.5, 0x5a4020);
-
-        // 桥下河流
-        const riverGeo = new THREE.PlaneGeometry(60, 100);
-        const riverMat = new THREE.MeshLambertMaterial({ color: 0x1a3a5a });
-        const river = new THREE.Mesh(riverGeo, riverMat);
+        // 河面 + 木桥（推进 70 米处横贯）
+        const riverZ = 26 - 70;
+        const river = this._mesh(new THREE.PlaneGeometry(W + 30, 11), 0x1d4e6b, 0, 0.01, riverZ, { mat: { transparent: true, opacity: 0.9 } });
         river.rotation.x = -Math.PI / 2;
-        river.position.set(0, -3, 0);
-        this.scene.add(river);
-        this.decor.push(river);
-
-        // 远处建筑
-        this._addBuilding(-30, -35, 8, 8, 5, 0x666666);
-        this._addBuilding(30, 35, 8, 8, 5, 0x666666);
-        this._addBuilding(-25, 30, 6, 6, 4, 0x556655);
-        this._addBuilding(25, -30, 6, 6, 4, 0x556655);
-
-        // 桥头堡
-        this._addBuilding(0, -50, 6, 10, 5, 0x5a4a30);
-        this._addBuilding(0, 50, 6, 10, 5, 0x5a4a30);
-
-        // 木箱
-        for (let i = 0; i < 8; i++) {
-            this._addCrate(Utils.randomRange(-30, 30), Utils.randomRange(-40, 40));
-        }
+        this._box(0, riverZ, 5.5, 12.5, 0.35, 0x7a5c33);
     }
 
-    // ===== 第5关: 基地2 =====
-    _buildBase2() {
-        // 铁丝网围栏（用柱子+墙表示）
-        for (let i = 0; i < 22; i++) {
-            this._addPillar(-50 + i * 5, -50, 3, 0x666666);
-            this._addPillar(-50 + i * 5, 50, 3, 0x666666);
+    _themeBase() {
+        const rand = Utils.seededRandom(2202 + this.index * 77);
+        const W = this.width, L = this.length;
+        // 两侧金属墙面
+        for (let d = 0; d < L + 30; d += 15) {
+            [-1, 1].forEach((s) => {
+                this._box(s * (W / 2 + 1.4), 26 - d - 7.5, 1.6, 15, 6.5, this.data.env.side, { noCollider: true });
+            });
         }
-        this._addWall(-50, 0, 0.5, 100, 2, 0x777777);
-        this._addWall(50, 0, 0.5, 100, 2, 0x777777);
-        this._addWall(0, -50, 100, 0.5, 2, 0x777777);
-        this._addWall(0, 50, 100, 0.5, 2, 0x777777);
-
-        // 哨塔（6个）
-        for (let i = 0; i < 6; i++) {
-            const angle = (i / 6) * Math.PI * 2;
-            const x = Math.cos(angle) * 40;
-            const z = Math.sin(angle) * 40;
-            this._addBuilding(x, z, 4, 4, 7, 0x444444);
+        // 顶部横梁与灯带
+        for (let d = 14; d < L; d += 22) {
+            this._box(0, 26 - d, W + 2, 0.8, 0.5, 0x22262e, { y0: 6.2, noCollider: true });
         }
-
-        // 建筑
-        this._addBuilding(-25, 0, 14, 8, 5, 0x556655);
-        this._addBuilding(25, 0, 14, 8, 5, 0x556655);
-        this._addBuilding(0, -25, 10, 8, 4, 0x445544);
-
-        // 油桶
-        for (let i = 0; i < 10; i++) {
-            this._addBarrel(Utils.randomRange(-40, 40), Utils.randomRange(-40, 40), 0xcc6622);
-        }
-
-        // 木箱
-        for (let i = 0; i < 10; i++) {
-            this._addCrate(Utils.randomRange(-40, 40), Utils.randomRange(-40, 40));
-        }
+        this._scatterCover(rand, 10, (x, z) => this._box(x, z, 1.2, 1.2, 1.2, 0x707a68));
+        this._scatterCover(rand, 6, (x, z) => {
+            const barrel = this._mesh(new THREE.CylinderGeometry(0.42, 0.42, 1.15, 8), 0x9a3324, x, 0.58, z);
+            this._addCollider({ type: 'circle', x, z, r: 0.5, h: 1.15 });
+            return barrel;
+        });
     }
 
-    // ===== 第6关: 洞窟 =====
-    _buildCave() {
-        // 洞窟内部 — 较暗，用点光源补充
-        const caveLight = new THREE.PointLight(0xffaa66, 0.8, 50);
-        caveLight.position.set(0, 10, 0);
-        this.scene.add(caveLight);
-        this.lights.push(caveLight);
-
-        // 钟乳石（从上方垂下）
-        for (let i = 0; i < 15; i++) {
-            const x = Utils.randomRange(-40, 40);
-            const z = Utils.randomRange(-40, 40);
-            const stalactite = new THREE.Mesh(
-                new THREE.ConeGeometry(Utils.randomRange(0.2, 0.5), Utils.randomRange(2, 5), 6),
-                new THREE.MeshLambertMaterial({ color: 0x4a4a3a })
-            );
-            stalactite.position.set(x, Utils.randomRange(4, 8), z);
-            this.scene.add(stalactite);
-            this.decor.push(stalactite);
+    _themeWaterfall() {
+        const rand = Utils.seededRandom(3303);
+        const W = this.width, L = this.length;
+        // 两侧岩壁
+        for (let d = 0; d < L + 24; d += 12) {
+            [-1, 1].forEach((s) => {
+                const rock = this._mesh(new THREE.DodecahedronGeometry(2.6, 0), 0x55503f, s * (W / 2 + 2.6), 1.6, 26 - d, { mat: { flatShading: true } });
+                rock.rotation.set(rand() * 2, rand() * 2, 0);
+            });
         }
-
-        // 石柱
-        for (let i = 0; i < 12; i++) {
-            const angle = (i / 12) * Math.PI * 2;
-            const r = Utils.randomRange(15, 35);
-            this._addPillar(Math.cos(angle) * r, Math.sin(angle) * r, Utils.randomRange(5, 8), 0x554433);
+        // 台阶：从推进 28 米起，每 11 米升 1.05 米
+        const stepDepth = 11, stepRise = 1.05;
+        const steps = Math.floor((L - 45) / stepDepth);
+        for (let i = 0; i < steps; i++) {
+            const topH = (i + 1) * stepRise;
+            const zC = 26 - 28 - i * stepDepth - stepDepth / 2;
+            this._box(0, zC, W, stepDepth + 0.3, topH, i % 2 ? 0x605a48 : 0x57503f, { list: 'objects' });
         }
-
-        // 岩石
-        for (let i = 0; i < 20; i++) {
-            this._addRock(
-                Utils.randomRange(-45, 45),
-                Utils.randomRange(-45, 45),
-                Utils.randomRange(1, 3)
-            );
-        }
-
-        // 岩壁（不规则围墙）
-        for (let i = 0; i < 30; i++) {
-            const angle = (i / 30) * Math.PI * 2;
-            const r = 50 + Utils.randomRange(-3, 5);
-            this._addWall(
-                Math.cos(angle) * r,
-                Math.sin(angle) * r,
-                0.5,
-                0.5,
-                Utils.randomRange(5, 10),
-                0x3a3a2a
-            );
-        }
-
-        // 地面裂缝效果（深色方块）
-        for (let i = 0; i < 10; i++) {
-            this._addBox(Utils.randomRange(-40, 40), Utils.randomRange(-40, 40), 1, 1, 0.1, 0x1a1a0a);
-        }
+        this.terraceTopY = steps * stepRise;
+        // 顶部平台（Boss 竞技段地面）：从最后一级台阶延伸到关底
+        const platStartZ = 26 - 28 - steps * stepDepth;
+        const platDepth = Math.abs(-L - 2 - platStartZ);
+        this._box(0, platStartZ - platDepth / 2, W, platDepth, this.terraceTopY, 0x605a48, { list: 'objects' });
+        // 瀑布水帘（关底岩壁前）
+        const fall = this._mesh(new THREE.PlaneGeometry(9, 16), 0x6ab0ff, -W / 4, 8, -L + 4,
+            { mat: { transparent: true, opacity: 0.45, side: THREE.DoubleSide } });
+        fall.name = 'waterfall';
+        const pool = this._mesh(new THREE.PlaneGeometry(W + 20, 12), 0x2a5a8a, 0, this.terraceTopY + 0.02, -L + 12,
+            { mat: { transparent: true, opacity: 0.85 } });
+        pool.rotation.x = -Math.PI / 2;
+        this._scatterCover(rand, 8, (x, z) => this._box(x, z, 1.1, 1.1, 1.0, 0x6b5a35));
     }
 
-    // ===== 第7关: 最终基地 =====
-    _buildFinalbase() {
-        // 红色主题的最终基地
-        // 外墙
-        this._addWall(-55, 0, 0.5, 110, 5, 0x442222);
-        this._addWall(55, 0, 0.5, 110, 5, 0x442222);
-        this._addWall(0, -55, 110, 0.5, 5, 0x442222);
-        this._addWall(0, 55, 110, 0.5, 5, 0x442222);
-
-        // 主建筑
-        this._addBuilding(0, -30, 20, 12, 6, 0x553322);
-        this._addBuilding(-30, 10, 10, 10, 5, 0x442222);
-        this._addBuilding(30, 10, 10, 10, 5, 0x442222);
-
-        // 哨塔
-        for (let i = 0; i < 4; i++) {
-            const x = (i % 2 === 0 ? -45 : 45);
-            const z = (i < 2 ? -45 : 45);
-            this._addBuilding(x, z, 5, 5, 8, 0x331111);
+    _themeSnow() {
+        const rand = Utils.seededRandom(4404);
+        const W = this.width, L = this.length;
+        for (let d = 4; d < L + 20; d += 8) {
+            [-1, 1].forEach((s) => {
+                if (rand() > 0.3) this._tree(s * (W / 2 + 2.5 + rand() * 3), 26 - d, rand, true);
+            });
         }
-
-        // 油桶（红色）
-        for (let i = 0; i < 12; i++) {
-            this._addBarrel(Utils.randomRange(-40, 40), Utils.randomRange(-40, 40), 0xaa2222);
-        }
-
-        // 木箱
-        for (let i = 0; i < 10; i++) {
-            this._addCrate(Utils.randomRange(-40, 40), Utils.randomRange(-40, 40), Utils.randomRange(0.8, 1.5), 0x8a5a20);
-        }
-
-        // 红色警戒灯
-        const warnLight1 = new THREE.PointLight(0xff0000, 0.5, 30);
-        warnLight1.position.set(-30, 8, -30);
-        this.scene.add(warnLight1);
-        this.lights.push(warnLight1);
-
-        const warnLight2 = new THREE.PointLight(0xff0000, 0.5, 30);
-        warnLight2.position.set(30, 8, 30);
-        this.scene.add(warnLight2);
-        this.lights.push(warnLight2);
+        // 雪堆掩体（可踩可挡）
+        this._scatterCover(rand, 12, (x, z) => {
+            const bank = this._mesh(new THREE.SphereGeometry(1.5, 8, 6), 0xe6eef6, x, -0.5, z);
+            bank.scale.set(1.3, 0.75, 1);
+            this._addCollider({ type: 'circle', x, z, r: 1.5, h: 1.1 });
+        });
+        this._scatterCover(rand, 6, (x, z) => this._box(x, z, 1.15, 1.15, 1.15, 0x7a6a4a));
     }
 
-    // ===== 第8关: 最终决战（Boss竞技场） =====
-    _buildFinalarena() {
-        // 红色围墙
-        this._addWall(-55, 0, 0.5, 110, 6, 0x331111);
-        this._addWall(55, 0, 0.5, 110, 6, 0x331111);
-        this._addWall(0, -55, 110, 0.5, 6, 0x331111);
-        this._addWall(0, 55, 110, 0.5, 6, 0x331111);
-
-        // Boss出场标记（红色圆环）
-        const markerGeo = new THREE.RingGeometry(6, 7, 32);
-        const markerMat = new THREE.MeshBasicMaterial({ color: 0xff0000, side: THREE.DoubleSide });
-        const marker = new THREE.Mesh(markerGeo, markerMat);
-        marker.rotation.x = -Math.PI / 2;
-        marker.position.set(0, 0.02, -30);
-        this.scene.add(marker);
-        this.decor.push(marker);
-
-        // 玩家区域标记
-        const pMarkerGeo = new THREE.RingGeometry(3, 3.5, 32);
-        const pMarkerMat = new THREE.MeshBasicMaterial({ color: 0x00ff00, side: THREE.DoubleSide });
-        const pMarker = new THREE.Mesh(pMarkerGeo, pMarkerMat);
-        pMarker.rotation.x = -Math.PI / 2;
-        pMarker.position.set(0, 0.02, 25);
-        this.scene.add(pMarker);
-        this.decor.push(pMarker);
-
-        // 竞技场柱子
-        for (let i = 0; i < 4; i++) {
-            const angle = (i / 4) * Math.PI * 2 + Math.PI / 4;
-            const x = Math.cos(angle) * 20;
-            const z = Math.sin(angle) * 20;
-            this._addPillar(x, z, 8, 0x442222);
+    _themeEnergy() {
+        const rand = Utils.seededRandom(5505);
+        const W = this.width, L = this.length;
+        for (let d = 8; d < L + 16; d += 13) {
+            [-1, 1].forEach((s) => {
+                const pillar = this._mesh(new THREE.CylinderGeometry(0.55, 0.7, 7, 8), 0x4a3423, s * (W / 2 + 1.8), 3.5, 26 - d);
+                return pillar;
+            });
         }
-
-        // 远景血红色灯光
-        const arenaLight1 = new THREE.PointLight(0xff2200, 0.8, 40);
-        arenaLight1.position.set(0, 15, -20);
-        this.scene.add(arenaLight1);
-        this.lights.push(arenaLight1);
-
-        const arenaLight2 = new THREE.PointLight(0xff0000, 0.5, 30);
-        arenaLight2.position.set(-30, 10, 0);
-        this.scene.add(arenaLight2);
-        this.lights.push(arenaLight2);
-
-        const arenaLight3 = new THREE.PointLight(0xff0000, 0.5, 30);
-        arenaLight3.position.set(30, 10, 0);
-        this.scene.add(arenaLight3);
-        this.lights.push(arenaLight3);
+        // 地面能量条（装饰发光线）
+        for (let d = 16; d < L; d += 18) {
+            const strip = this._mesh(new THREE.PlaneGeometry(W - 4, 0.5), 0xff7722, 0, 0.015, 26 - d,
+                { mat: { emissive: 0x903500 } });
+            strip.rotation.x = -Math.PI / 2;
+        }
+        this._scatterCover(rand, 8, (x, z) => this._box(x, z, 1.2, 1.2, 1.3, 0x5c4630));
     }
 
-    // ===== 敌人生成 =====
-    _spawnEnemies() {
-        const data = this.data;
-        const half = this.size / 2 - 10;
-
-        for (let i = 0; i < data.enemyCount; i++) {
-            const type = data.enemyTypes[i % data.enemyTypes.length];
-            // 随机位置，远离玩家初始位置
-            let x, z, tries = 0;
-            do {
-                x = Utils.randomRange(-half, half);
-                z = Utils.randomRange(-half, half);
-                tries++;
-            } while (Utils.dist2({ x, z }, { x: 0, z: 30 }) < 200 && tries < 20);
-
-            const enemy = new Enemy(this.scene, type, x, z, this);
-            enemy.player = Game.player;
-            this.enemies.push(enemy);
+    _themeHangar() {
+        const rand = Utils.seededRandom(6606);
+        const W = this.width, L = this.length;
+        for (let d = 6; d < L + 20; d += 16) {
+            [-1, 1].forEach((s) => {
+                this._box(s * (W / 2 + 2.2), 26 - d - 4, 3.2, 7, 3 + (Math.floor(rand() * 2)), s > 0 ? 0x746a4c : 0x5e6a72, { noCollider: true });
+            });
         }
-
-        // Boss
-        if (data.boss) {
-            const bossType = data.boss === 'redfalcon' ? 'redFalcon' : 'bossTurret';
-            const boss = new Enemy(this.scene, bossType, 0, -30, this);
-            boss.player = Game.player;
-            this.enemies.push(boss);
-        }
+        this._scatterCover(rand, 10, (x, z) => this._box(x, z, 1.25, 1.25, 1.25, 0x8a7a4a));
+        // 矿车轨道（装饰横线）
+        (this.data.carts || []).forEach((cd) => {
+            const rail = this._mesh(new THREE.PlaneGeometry(W + 6, 1.6), 0x2c2c2c, 0, 0.012, 26 - cd);
+            rail.rotation.x = -Math.PI / 2;
+        });
     }
 
-    // ===== 更新 =====
-    update(deltaTime) {
-        let aliveCount = 0;
-        for (const enemy of this.enemies) {
-            enemy.update(deltaTime, Game.player);
-            if (enemy.alive) aliveCount++;
+    _themeAlien() {
+        const rand = Utils.seededRandom(7707);
+        const W = this.width, L = this.length;
+        for (let d = 5; d < L + 16; d += 9) {
+            [-1, 1].forEach((s) => {
+                const blob = this._mesh(new THREE.SphereGeometry(1.9 + rand() * 1.2, 9, 7), 0x5c1c38, s * (W / 2 + 2.2), 1.2, 26 - d,
+                    { mat: { emissive: 0x1c020a } });
+                blob.scale.y = 1.25;
+            });
         }
-
-        // 检查关卡完成
-        if (!this.completed && aliveCount === 0) {
-            this.completed = true;
-            this.onComplete();
+        // 肋骨拱门
+        for (let d = 20; d < L - 10; d += 26) {
+            const arch = this._mesh(new THREE.TorusGeometry(W / 2 + 0.5, 0.35, 7, 14, Math.PI), 0x8a3a5c, 0, 0, 26 - d);
+            arch.rotation.z = 0;
+            arch.name = 'rib';
         }
-
-        // 更新进度
-        this.killedCount = this.totalEnemies - aliveCount;
-        const pct = this.totalEnemies > 0 ? (this.killedCount / this.totalEnemies) * 100 : 0;
-        const fillEl = document.getElementById('objectiveFill');
-        const killedEl = document.getElementById('enemyKilled');
-        if (fillEl) fillEl.style.width = pct + '%';
-        if (killedEl) killedEl.textContent = this.killedCount;
+        this._scatterCover(rand, 8, (x, z) => {
+            const egg = this._mesh(new THREE.SphereGeometry(0.8, 8, 7), 0x9a4a6a, x, 0.55, z, { mat: { emissive: 0x22040e } });
+            egg.scale.y = 1.25;
+            this._addCollider({ type: 'circle', x, z, r: 0.8, h: 1.2 });
+        });
     }
 
-    onComplete() {
-        AudioManager.levelComplete();
-        Game.onLevelComplete();
+    // ---------------- 机关 ----------------
+    _buildGate(dist) {
+        const z = 26 - dist, W = this.width;
+        const frameM = 0x394048;
+        this._box(-(W / 2 - 1), z, 2, 1, 6, frameM, { list: 'objects' });
+        this._box((W / 2 - 1), z, 2, 1, 6, frameM, { list: 'objects' });
+        this._box(0, z, W, 1, 1, frameM, { y0: 5, list: 'objects' });
+        // 电网面
+        const field = new THREE.Mesh(new THREE.PlaneGeometry(W - 4, 5),
+            new THREE.MeshBasicMaterial({ color: 0x33ccff, transparent: true, opacity: 0.4, side: THREE.DoubleSide, depthWrite: false }));
+        field.position.set(0, 2.5, z);
+        this.scene.add(field); this.objects.push(field);
+        const collider = this._addCollider({ type: 'box', x: 0, z, w: W - 3.4, d: 0.9, h: 5.2, y0: 0 });
+        const sensor = new GateSensor(this.scene, 0, 3.1, z + 0.8, () => {
+            collider.disabled = true;
+            field.visible = false;
+            sensor.mesh.visible = false;
+            this.ctx.projectiles.spawnExplosionFX(new THREE.Vector3(0, 3, z + 0.8), 2.2, 0x66d9ff);
+            this.pickups.spawnLetter(2.5, 3.4, z - 3.5, '+');
+        }, this.ctx.onScore);
+        this.sensors.push(sensor);
+        this.gates.push({ dist, z, field, collider, sensor, open: false });
     }
 
-    // ===== 清理 =====
+    _buildFlame(dist, i) {
+        const z = 26 - dist;
+        const x = (i % 2 === 0 ? -1 : 1) * this.width * 0.18;
+        const base = this._mesh(new THREE.CylinderGeometry(0.55, 0.7, 0.5, 8), 0x553311, x, 0.25, z);
+        const flame = new THREE.Mesh(new THREE.ConeGeometry(0.85, 4.4, 8),
+            new THREE.MeshBasicMaterial({ color: 0xff6a1a, transparent: true, opacity: 0.85 }));
+        flame.position.set(x, 2.4, z);
+        flame.visible = false;
+        this.scene.add(flame); this.objects.push(flame);
+        const warn = new THREE.Mesh(new THREE.SphereGeometry(0.3, 6, 6),
+            new THREE.MeshBasicMaterial({ color: 0xffcc33, transparent: true, opacity: 0 }));
+        warn.position.set(x, 0.8, z);
+        this.scene.add(warn); this.objects.push(warn);
+        this.flames.push({ x, z, flame, warn, period: 3.4, phase: i * 1.3, erupting: false });
+    }
+
+    _buildCart(dist, i) {
+        const z = 26 - dist;
+        const g = new THREE.Group();
+        const bodyM = new THREE.MeshLambertMaterial({ color: 0x6a6a72 });
+        const body = new THREE.Mesh(new THREE.BoxGeometry(3.2, 1.3, 1.9), bodyM);
+        body.position.y = 0.95; g.add(body);
+        const spikeM = new THREE.MeshLambertMaterial({ color: 0xb9b9c4 });
+        [-1, 1].forEach((s) => {
+            for (let k = -1; k <= 1; k++) {
+                const spike = new THREE.Mesh(new THREE.ConeGeometry(0.16, 0.8, 6), spikeM);
+                spike.rotation.z = s > 0 ? -Math.PI / 2 : Math.PI / 2;
+                spike.position.set(s * 1.95, 0.95, k * 0.55);
+                g.add(spike);
+            }
+        });
+        [-1.1, 1.1].forEach((wx) => [-0.7, 0.7].forEach((wz) => {
+            const wheel = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.3, 0.15, 8), new THREE.MeshLambertMaterial({ color: 0x222222 }));
+            wheel.rotation.x = Math.PI / 2;
+            wheel.position.set(wx, 0.3, wz);
+            g.add(wheel);
+        }));
+        g.position.set(0, 0, z);
+        this.scene.add(g); this.objects.push(g);
+        const collider = this._addCollider({ type: 'box', x: 0, z, w: 3.4, d: 2, h: 1.7, y0: 0 });
+        this.carts.push({ group: g, collider, z, phase: i * 2.1, speed: 0.55 + i * 0.12, hitCooldown: 0 });
+    }
+
+    // ---------------- 生成 ----------------
+    _spawnEnemy(type, x, z) {
+        let y = this.getSupportY(x, z, 999);
+        if (type === 'sniper') {
+            // 狙击手上平台（平台基底坐在当前地面上）
+            const plat = this._box(x, z, 1.9, 1.9, 2.2, 0x5c5648, { list: 'objects', y0: y });
+            plat.name = 'sniperPlat';
+            y = y + 2.2;
+        }
+        const e = new Enemy(this.scene, type, x, y, z, this.enemyCtx);
+        this.enemies.push(e);
+        return e;
+    }
+
+    spawnMinion(type, x, z) { return this._spawnEnemy(type, x, z); }
+
+    getTargets() {
+        const out = [];
+        for (const e of this.enemies) if (e.alive) out.push(e);
+        if (this.boss) out.push(...this.boss.targets);
+        for (const s of this.sensors) if (s.alive) out.push(s);
+        const f = this.pickups.getFalconTarget();
+        if (f) out.push(f);
+        return out;
+    }
+
+    get bossActive() { return this.bossActivated && this.boss && this.boss.alive; }
+    get bossFraction() { return this.boss ? this.boss.hpFraction : 0; }
+    get bossName() { return BOSS_DATA[this.data.boss].name; }
+
+    // ---------------- 更新 ----------------
+    update(dt, player, cameraPos) {
+        this.time += dt;
+        const dist = this.playerDist(player);
+
+        // 敌人分批触发
+        for (const s of this.spawnQueue) {
+            if (!s.done && dist >= s.dist - 30) {
+                s.done = true;
+                this._spawnEnemy(s.type, s.x, 26 - s.dist);
+            }
+        }
+        // 飞鹰触发
+        for (const f of this.falconQueue) {
+            if (!f.done && dist >= f.dist) {
+                f.done = true;
+                this.pickups.spawnFalcon(player.position.z - 20, f.letter, this.width / 2);
+            }
+        }
+        // 检查点
+        while (this._cpIndex < this.checkpoints.length - 1) {
+            const cp = this.checkpoints[this._cpIndex + 1];
+            if ((cp.dist !== undefined && dist >= cp.dist) || (cp.dist === undefined && dist >= 0)) {
+                this._cpIndex++;
+                const y = this.getSupportY(cp.x, cp.z, 999);
+                this.ctx.onCheckpoint({ x: cp.x, y, z: cp.z });
+            } else break;
+        }
+
+        // 敌人
+        for (let i = this.enemies.length - 1; i >= 0; i--) {
+            const e = this.enemies[i];
+            if (e.update(dt, player, cameraPos)) {
+                e.destroy();
+                this.enemies.splice(i, 1);
+            }
+        }
+
+        // Boss 竞技段触发
+        if (!this.bossActivated && dist >= this.length - 42) {
+            this.bossActivated = true;
+            const barrierZ = this.bossZ + 27;
+            const wall = new THREE.Mesh(new THREE.PlaneGeometry(this.width, 6),
+                new THREE.MeshBasicMaterial({ color: 0xff3344, transparent: true, opacity: 0.35, side: THREE.DoubleSide, depthWrite: false }));
+            wall.position.set(0, this.bossY + 3, barrierZ);
+            this.scene.add(wall); this.objects.push(wall);
+            this._addCollider({ type: 'box', x: 0, z: barrierZ, w: this.width, d: 0.7, h: 8, y0: this.bossY });
+            this.boss.activate();
+            this.ctx.onBossActivated(this.boss);
+            const y = this.getSupportY(0, barrierZ - 4, 999);
+            this.ctx.onCheckpoint({ x: 0, y, z: barrierZ - 4 });
+            this.pickups.spawnHeal(3, barrierZ - 6);
+        }
+        if (this.boss) this.boss.update(dt, player);
+
+        // 电网脉动
+        for (const g of this.gates) {
+            if (g.sensor.alive) g.field.material.opacity = 0.3 + Math.sin(this.time * 7) * 0.12;
+            if (!g.sensor.alive) g.open = true;
+        }
+
+        // 火焰喷口（节拍：预警→喷发→休止）
+        for (const f of this.flames) {
+            const t = (this.time + f.phase) % f.period;
+            f.erupting = t > 1.3 && t < 2.5;
+            f.warn.material.opacity = (t > 0.8 && t <= 1.3) ? 0.8 : 0;
+            f.flame.visible = f.erupting;
+            if (f.erupting && player.alive) {
+                const dx = player.position.x - f.x, dz = player.position.z - f.z;
+                const gy = this.getSupportY(f.x, f.z, 999);
+                if (dx * dx + dz * dz < 1.7 && player.position.y < gy + 3.4) player.takeDamage(1);
+            }
+        }
+
+        // 矿车往复
+        for (const c of this.carts) {
+            const x = Math.sin(this.time * c.speed + c.phase) * (this.width / 2 - 3.4);
+            c.group.position.x = x;
+            c.collider.x = x;
+            if (c.hitCooldown > 0) c.hitCooldown -= dt;
+            if (player.alive && c.hitCooldown <= 0) {
+                const dx = player.position.x - x, dz = player.position.z - c.z;
+                if (Math.abs(dx) < 2.2 && Math.abs(dz) < 1.9 && player.position.y < 1.9) {
+                    c.hitCooldown = 1;
+                    if (player.takeDamage(1)) player.position.z += 2.6;
+                }
+            }
+        }
+
+        // 瀑布落石
+        if (this.data.theme === 'waterfall' && player.alive) {
+            this._rockTimer -= dt;
+            if (this._rockTimer <= 0 && dist > 20 && dist < this.length - 45) {
+                this._rockTimer = Utils.randomRange(2.2, 3.6);
+                const z = player.position.z - 26;
+                const mesh = this._mesh(new THREE.DodecahedronGeometry(0.55, 0), 0x6a6250, Utils.randomRange(-this.width / 2 + 3, this.width / 2 - 3), 0, z, { mat: { flatShading: true }, list: 'objects' });
+                this.rocks.push({ mesh, speed: 8.5, t: 0 });
+            }
+        }
+        for (let i = this.rocks.length - 1; i >= 0; i--) {
+            const r = this.rocks[i];
+            r.t += dt;
+            r.mesh.position.z += r.speed * dt;
+            r.mesh.position.y = this.getSupportY(r.mesh.position.x, r.mesh.position.z, r.mesh.position.y + 2) + 0.5;
+            r.mesh.rotation.x -= dt * 6;
+            const dx = player.position.x - r.mesh.position.x, dz = player.position.z - r.mesh.position.z;
+            if (player.alive && dx * dx + dz * dz < 1.15 && Math.abs(player.position.y - r.mesh.position.y) < 1.6) {
+                player.takeDamage(1);
+                this.scene.remove(r.mesh); Utils.disposeObject(r.mesh);
+                this.rocks.splice(i, 1);
+                continue;
+            }
+            if (r.t > 7 || r.mesh.position.z > player.position.z + 14) {
+                this.scene.remove(r.mesh); Utils.disposeObject(r.mesh);
+                this.rocks.splice(i, 1);
+            }
+        }
+
+        this.pickups.update(dt, player, this);
+    }
+
     destroy() {
-        for (const enemy of this.enemies) {
-            enemy.destroy();
-        }
-        for (const obj of this.objects) {
-            this.scene.remove(obj);
-        }
-        for (const d of this.decor) {
-            this.scene.remove(d);
-        }
-        // 移除灯光
-        for (const l of this.lights) {
-            this.scene.remove(l);
-        }
-        // 移除雾和背景
+        for (const e of this.enemies) e.destroy();
+        this.enemies = [];
+        if (this.boss) { this.boss.destroy(); this.boss = null; }
+        for (const s of this.sensors) s.destroy();
+        this.pickups.destroy();
+        for (const o of this.objects) { this.scene.remove(o); Utils.disposeObject(o); }
+        for (const d of this.decor) { this.scene.remove(d); Utils.disposeObject(d); }
+        for (const l of this.lights) this.scene.remove(l);
         this.scene.fog = null;
     }
 }

@@ -1,226 +1,140 @@
 /**
- * 武器系统 — 射击、射线检测、弹药、换弹
+ * 道具系统 — 飞鹰徽章（Falcon）与掉落拾取
+ * 飞鹰从走廊上方横飞，打下来掉字母道具：N/M/F/L/S 换枪、R 加速、B 防护罩、+ 回 1 格血。
+ * （本文件为旧版 WeaponSystem 的替代实现，射击逻辑已在 Player + ProjectileSystem 中。）
  */
-class WeaponSystem {
-    constructor(scene, player) {
+class PickupSystem {
+    constructor(scene, ctx) {
         this.scene = scene;
-        this.player = player;
-        this.raycaster = new THREE.Raycaster();
-
-        // 枪口闪光
-        this.muzzleFlash = null;
-        this._createMuzzleFlash();
-
-        // 子弹轨迹线
-        this.tracers = [];
-        this.maxTracers = 10;
-
-        // 射击间隔
-        this.lastShotTime = 0;
+        this.ctx = ctx; // { onPickup(letter), onScore(n) }
+        this.items = [];
+        this.falcon = null;
+        this._texCache = {};
     }
 
-    _createMuzzleFlash() {
-        const geo = new THREE.SphereGeometry(0.15, 6, 6);
-        const mat = new THREE.MeshBasicMaterial({ color: 0xffaa00, transparent: true, opacity: 0 });
-        this.muzzleFlash = new THREE.Mesh(geo, mat);
-        this.muzzleFlash.position.set(0, 0, -0.5);
-        this.scene.add(this.muzzleFlash);
+    _letterTexture(letter) {
+        if (this._texCache[letter]) return this._texCache[letter];
+        const cv = document.createElement('canvas');
+        cv.width = 128; cv.height = 128;
+        const g = cv.getContext('2d');
+        g.fillStyle = letter === '+' ? '#14532d' : '#5b1a1a';
+        g.fillRect(0, 0, 128, 128);
+        g.strokeStyle = '#ffd34d'; g.lineWidth = 8;
+        g.strokeRect(6, 6, 116, 116);
+        g.fillStyle = letter === '+' ? '#7dffa8' : '#ffe08a';
+        g.font = 'bold 84px Arial';
+        g.textAlign = 'center'; g.textBaseline = 'middle';
+        g.fillText(letter, 64, 70);
+        const tex = new THREE.CanvasTexture(cv);
+        this._texCache[letter] = tex;
+        return tex;
     }
 
-    update(deltaTime) {
-        // 枪口闪光衰减
-        if (this.muzzleFlash.material.opacity > 0) {
-            this.muzzleFlash.material.opacity -= deltaTime * 10;
-            if (this.muzzleFlash.material.opacity <= 0) {
-                this.muzzleFlash.material.opacity = 0;
-            }
-        }
-
-        // 更新子弹轨迹
-        for (let i = this.tracers.length - 1; i >= 0; i--) {
-            const t = this.tracers[i];
-            t.line.material.opacity -= deltaTime * 4;
-            if (t.line.material.opacity <= 0) {
-                this.scene.remove(t.line);
-                this.tracers.splice(i, 1);
-            }
-        }
+    _makeItemMesh(letter) {
+        const tex = this._letterTexture(letter);
+        const mat = new THREE.MeshBasicMaterial({ map: tex });
+        const mesh = new THREE.Mesh(new THREE.BoxGeometry(0.72, 0.72, 0.72),
+            [mat, mat, mat, mat, mat, mat]);
+        return mesh;
     }
 
-    _showMuzzleFlash() {
-        // 将枪口闪光放在相机右下方
-        const offset = new THREE.Vector3(0.3, -0.2, -0.5);
-        offset.applyQuaternion(this.player.camera.quaternion);
-        this.muzzleFlash.position.copy(this.player.camera.position).add(offset);
-        this.muzzleFlash.material.opacity = 1;
+    spawnLetter(x, y, z, letter) {
+        const mesh = this._makeItemMesh(letter);
+        mesh.position.set(x, y, z);
+        this.scene.add(mesh);
+        this.items.push({ mesh, letter, x, z, y, vy: 0, landed: false, t: Math.random() * 6 });
     }
 
-    _createTracer(from, to) {
-        const geo = new THREE.BufferGeometry().setFromPoints([from, to]);
-        const mat = new THREE.LineBasicMaterial({ color: 0xffff00, transparent: true, opacity: 0.6 });
-        const line = new THREE.Line(geo, mat);
-        this.scene.add(line);
-        this.tracers.push({ line });
-        if (this.tracers.length > this.maxTracers) {
-            const old = this.tracers.shift();
-            this.scene.remove(old.line);
-        }
+    spawnHeal(x, z) {
+        this.spawnLetter(x, 3.2, z, '+');
     }
 
-    shoot(enemies) {
-        const now = performance.now();
-        const w = this.player.getCurrentWeapon();
-        const ammo = this.player.getAmmo();
+    spawnFalcon(z, letter, corridorHalfWidth) {
+        if (this.falcon) return;
+        const group = new THREE.Group();
+        const red = new THREE.MeshLambertMaterial({ color: 0xb02020 });
+        const gold = new THREE.MeshLambertMaterial({ color: 0xd8a020 });
+        const body = new THREE.Mesh(new THREE.CylinderGeometry(0.32, 0.32, 1.05, 10), red);
+        body.rotation.z = Math.PI / 2;
+        group.add(body);
+        [-0.55, 0.55].forEach((wx) => {
+            const wing = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.06, 0.34), gold);
+            wing.position.set(wx, 0.12, -0.1);
+            wing.rotation.z = wx > 0 ? -0.35 : 0.35;
+            group.add(wing);
+        });
+        const eye = new THREE.Mesh(new THREE.SphereGeometry(0.1, 6, 6), new THREE.MeshBasicMaterial({ color: 0xffe08a }));
+        eye.position.set(0, 0.1, 0.3);
+        group.add(eye);
+        const dir = Math.random() > 0.5 ? 1 : -1;
+        const startX = -dir * (corridorHalfWidth + 3);
+        group.position.set(startX, 6.4, z);
+        this.scene.add(group);
+        const self = this;
+        const falcon = {
+            mesh: group, dir, speed: 11, z, letter, alive: true, halfW: corridorHalfWidth,
+            hitX: startX, hitY: 6.4, hitZ: z, hitR: 0.75,
+            onHit() {
+                if (!this.alive) return;
+                this.alive = false;
+                self.ctx.onScore(100);
+                // 道具必须落在走廊内可拾取范围（曾有掉在墙外拿不到的 bug）
+                const dropX = Utils.clamp(this.hitX, -this.halfW + 2, this.halfW - 2);
+                self.spawnLetter(dropX, 5.6, this.z, this.letter);
+                AudioManager.enemyDie();
+            },
+        };
+        this.falcon = falcon;
+    }
 
-        if (this.player.isReloading) return false;
-        if (now - this.lastShotTime < w.fireRate * 1000) return false;
-        if (ammo.mag <= 0) {
-            this.player.reload();
-            return false;
-        }
-
-        this.lastShotTime = now;
-        ammo.mag--;
-        this.player._updateHUD();
-
-        AudioManager.shoot(w === CONFIG.weapons[1] ? 120 : 250, 'square');
-        this._showMuzzleFlash();
-
-        // 射线检测
-        const origin = this.player.camera.position.clone();
-        const direction = new THREE.Vector3(0, 0, -1);
-        direction.applyQuaternion(this.player.camera.quaternion);
-
-        const pellets = w.pellets || 1;
-        for (let p = 0; p < pellets; p++) {
-            // 散布
-            const spread = w.spread;
-            const spreadX = (Math.random() - 0.5) * spread;
-            const spreadY = (Math.random() - 0.5) * spread;
-            const dir = direction.clone();
-            // 在相机空间中散布
-            const right = new THREE.Vector3(1, 0, 0);
-            right.applyQuaternion(this.player.camera.quaternion);
-            const up = new THREE.Vector3(0, 1, 0);
-            up.applyQuaternion(this.player.camera.quaternion);
-            dir.add(right.multiplyScalar(spreadX));
-            dir.add(up.multiplyScalar(spreadY));
-            dir.normalize();
-
-            this.raycaster.set(origin, dir);
-            this.raycaster.far = w.range;
-
-            // 检测敌人
-            let closestHit = null;
-            let closestDist = w.range;
-
-            for (const enemy of enemies) {
-                if (!enemy.alive) continue;
-                const hit = this._raycastEnemy(origin, dir, enemy);
-                if (hit && hit.dist < closestDist) {
-                    closestHit = enemy;
-                    closestDist = hit.dist;
-                }
-            }
-
-            // 检测场景碰撞体（墙壁、箱子等）
-            let sceneDist = w.range;
-            for (const c of this.player.colliders) {
-                const hit = this._raycastCollider(origin, dir, c);
-                if (hit && hit < sceneDist) {
-                    sceneDist = hit;
-                }
-            }
-
-            // 地形（地面）
-            const groundDist = origin.y > 0 ? origin.y / Math.abs(dir.y) : w.range;
-            if (Math.abs(dir.y) > 0.001 && groundDist < sceneDist) {
-                sceneDist = Math.min(sceneDist, groundDist);
-            }
-
-            let endPoint;
-            if (closestHit && closestDist <= sceneDist) {
-                // 击中敌人
-                closestHit.takeDamage(w.damage);
-                endPoint = origin.clone().add(dir.clone().multiplyScalar(closestDist));
-                // 血溅效果
-                closestHit._showHitEffect(endPoint);
+    update(dt, player, level) {
+        // 飞鹰横飞
+        if (this.falcon) {
+            const f = this.falcon;
+            if (!f.alive) {
+                this.scene.remove(f.mesh); Utils.disposeObject(f.mesh);
+                this.falcon = null;
             } else {
-                endPoint = origin.clone().add(dir.clone().multiplyScalar(sceneDist));
-            }
-
-            this._createTracer(origin, endPoint);
-        }
-
-        return true;
-    }
-
-    _raycastEnemy(origin, dir, enemy) {
-        // 简化的敌人碰撞体：圆柱体近似为球体
-        const enemyPos = new THREE.Vector3(enemy.position.x, enemy.position.y, enemy.position.z);
-        const radius = CONFIG.enemy.radius;
-        // 球体射线相交
-        const oc = origin.clone().sub(enemyPos);
-        const a = dir.dot(dir);
-        const b = 2 * oc.dot(dir);
-        const c = oc.dot(oc) - radius * radius;
-        const disc = b * b - 4 * a * c;
-        if (disc < 0) return null;
-        const t = (-b - Math.sqrt(disc)) / (2 * a);
-        if (t < 0) return null;
-        return { dist: t };
-    }
-
-    _raycastCollider(origin, dir, c) {
-        // 盒子碰撞体的射线相交（AABB）
-        if (c.type === 'box') {
-            const minX = c.x - c.w / 2, maxX = c.x + c.w / 2;
-            const minZ = c.z - c.d / 2, maxZ = c.z + c.d / 2;
-            const height = c.h || CONFIG.level.wallHeight;
-            const minY = 0, maxY = height;
-
-            let tmin = -Infinity, tmax = Infinity;
-            for (let i = 0; i < 3; i++) {
-                const o = i === 0 ? origin.x : (i === 1 ? origin.y : origin.z);
-                const d = i === 0 ? dir.x : (i === 1 ? dir.y : dir.z);
-                const lo = i === 0 ? minX : (i === 1 ? minY : minZ);
-                const hi = i === 0 ? maxX : (i === 1 ? maxY : maxZ);
-                if (Math.abs(d) < 0.0001) {
-                    if (o < lo || o > hi) return Infinity;
-                } else {
-                    let t1 = (lo - o) / d;
-                    let t2 = (hi - o) / d;
-                    if (t1 > t2) [t1, t2] = [t2, t1];
-                    tmin = Math.max(tmin, t1);
-                    tmax = Math.min(tmax, t2);
-                    if (tmin > tmax) return Infinity;
+                f.mesh.position.x += f.dir * f.speed * dt;
+                f.mesh.position.y = 6.4 + Math.sin(performance.now() / 280) * 0.25;
+                f.mesh.rotation.y = f.dir > 0 ? Math.PI / 2 : -Math.PI / 2;
+                f.hitX = f.mesh.position.x; f.hitY = f.mesh.position.y; f.hitZ = f.z;
+                if (Math.abs(f.mesh.position.x) > level.width / 2 + 8) {
+                    this.scene.remove(f.mesh); Utils.disposeObject(f.mesh);
+                    this.falcon = null;
                 }
             }
-            return tmin > 0 ? tmin : Infinity;
-        } else if (c.type === 'circle') {
-            // 圆柱体：先做水平面射线相交
-            const ox = origin.x, oz = origin.z;
-            const dx = dir.x, dz = dir.z;
-            const fx = ox - c.x, fz = oz - c.z;
-            const a = dx * dx + dz * dz;
-            const b = 2 * (fx * dx + fz * dz);
-            const cc = fx * fx + fz * fz - c.r * c.r;
-            const disc = b * b - 4 * a * cc;
-            if (disc < 0) return Infinity;
-            const t = (-b - Math.sqrt(disc)) / (2 * a);
-            if (t < 0) return Infinity;
-            const hitY = origin.y + dir.y * t;
-            if (hitY < 0 || hitY > (c.h || CONFIG.level.wallHeight)) return Infinity;
-            return t;
         }
-        return Infinity;
+        // 道具下落/拾取
+        for (let i = this.items.length - 1; i >= 0; i--) {
+            const it = this.items[i];
+            it.t += dt;
+            if (!it.landed) {
+                const groundY = level.getSupportY(it.x, it.z, it.y) + 0.55;
+                it.y -= 3.4 * dt;
+                if (it.y <= groundY) { it.y = groundY; it.landed = true; }
+                it.mesh.position.set(it.x, it.y, it.z);
+            } else {
+                it.mesh.position.y = it.y + Math.sin(it.t * 3.2) * 0.09;
+            }
+            it.mesh.rotation.y += dt * 2.4;
+            const dx = player.position.x - it.x, dz = player.position.z - it.z;
+            const dy = (player.position.y + 0.9) - it.mesh.position.y;
+            if (dx * dx + dz * dz < 1.7 && Math.abs(dy) < 1.9 && player.alive) {
+                this.ctx.onPickup(it.letter);
+                this.scene.remove(it.mesh);
+                this.items.splice(i, 1);
+            }
+        }
     }
 
-    syncMuzzleToCamera() {
-        if (this.muzzleFlash.material.opacity > 0) {
-            const offset = new THREE.Vector3(0.25, -0.15, -0.6);
-            offset.applyQuaternion(this.player.camera.quaternion);
-            this.muzzleFlash.position.copy(this.player.camera.position).add(offset);
-        }
+    getFalconTarget() { return this.falcon && this.falcon.alive ? this.falcon : null; }
+
+    destroy() {
+        if (this.falcon) { this.scene.remove(this.falcon.mesh); Utils.disposeObject(this.falcon.mesh); this.falcon = null; }
+        for (const it of this.items) this.scene.remove(it.mesh);
+        this.items = [];
+        Object.values(this._texCache).forEach((t) => t.dispose());
+        this._texCache = {};
     }
 }

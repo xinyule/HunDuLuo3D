@@ -1,641 +1,328 @@
 /**
- * 敌人AI系统 — 魂斗罗风格
- * soldier(远程射击) / runner(近战冲锋) / turret(固定炮台)
- * bossTurret(大型炮台Boss) / redFalcon(最终Boss)
+ * 敌人 — 岗位制 AI，全类型发射实体弹丸（慢速红弹，可躲）
+ * 类型：rifleman 步兵 / runner 红衣冲锋 / sniper 狙击手 / mortar 迫击炮 /
+ *       turret 地堡炮台 / roller 滚雷 / spore 异形幼体 / tank 装甲扫讨车（中Boss）
+ * 可击接口：alive / hitX / hitY / hitZ / hitR / onHit(dmg, point)
  */
 class Enemy {
-    constructor(scene, type, x, z, level) {
+    constructor(scene, type, x, y, z, ctx) {
         this.scene = scene;
         this.type = type;
-        this.level = level;
-        this.position = { x, y: 0, z };
+        this.ctx = ctx; // { projectiles, onScore }
+        this.position = { x, y, z };
+        const d = ENEMY_DATA[type];
+        this.hp = d.hp; this.maxHp = d.hp;
+        this.radius = d.radius; this.scoreValue = d.score;
         this.alive = true;
-        this.health = 0;
-        this.maxHealth = 0;
-        this.speed = 0;
-        this.chaseSpeed = 0;
-        this.radius = 0;
-        this.damage = 0;
-        this.fireRate = 0;
-        this.detectionRange = 0;
-        this.shootRange = 0;
-        this.scoreValue = 0;
-        this.meleeRange = 0;
+        this.deathT = 0;
+        this.t = Math.random() * 10;
+        this.fireTimer = Utils.randomRange(0.5, 1.4);
+        this.burstLeft = 0;
+        this.meleeTimer = 0;
+        this.facing = Math.PI;
+        this._flashT = 0;
+        this._scored = false;
 
-        // 类型属性
-        this._applyType(type);
+        this.hitX = x; this.hitY = y + 1; this.hitZ = z; this.hitR = d.radius + 0.3;
+        if (type === 'tank') { this.hitY = y + 1.7; this.hitR = 2.1; }
+        if (type === 'turret') { this.hitY = y + 0.9; this.hitR = 1.0; }
 
-        // AI 状态
-        this.state = 'patrol';
-        this.patrolTarget = { x, z };
-        this.patrolTimer = 0;
-        this.lastShotTime = 0;
-        this.lastSeenTime = 0;
-        this.facing = 0;
-
-        // 射击模式
-        this.burstCount = 0;      // 当前点射剩余发数
-        this.burstTimer = 0;      // 点射间隔
-        this.burstCooldown = 0;   // 点射冷却
-
-        // Boss 特殊攻击
-        this.specialTimer = 0;
-        this.phase = 0;
-
-        // 模型
-        this.mesh = this._createMesh(type);
-        this.mesh.position.set(x, 0, z);
+        this.mesh = this._buildMesh();
+        this.mesh.position.set(x, y, z);
         this.scene.add(this.mesh);
-
-        // 血条
-        this.healthBar = null;
-        this._createHealthBar();
-
-        // 死亡/命中效果
-        this.deathTimer = 0;
-        this.hitFlashTimer = 0;
-        this._hitFlash = null;
-        this._bodyMats = []; // 用于命中闪白
+        this._buildHealthBar();
     }
 
-    _applyType(type) {
-        const e = CONFIG.enemy;
-        if (type === 'soldier') {
-            this.health = e.soldier.health; this.speed = e.soldier.speed; this.chaseSpeed = e.soldier.chaseSpeed;
-            this.radius = e.soldier.radius; this.damage = e.soldier.damage; this.fireRate = e.soldier.fireRate;
-            this.detectionRange = e.soldier.detectionRange; this.shootRange = e.soldier.shootRange;
-            this.scoreValue = e.soldier.scoreValue;
-        } else if (type === 'runner') {
-            this.health = e.runner.health; this.speed = e.runner.speed; this.chaseSpeed = e.runner.chaseSpeed;
-            this.radius = e.runner.radius; this.damage = e.runner.damage; this.fireRate = e.runner.fireRate;
-            this.detectionRange = e.runner.detectionRange; this.shootRange = e.runner.shootRange;
-            this.scoreValue = e.runner.scoreValue; this.meleeRange = e.runner.meleeRange;
-        } else if (type === 'turret') {
-            this.health = e.turret.health; this.speed = e.turret.speed; this.chaseSpeed = e.turret.chaseSpeed;
-            this.radius = e.turret.radius; this.damage = e.turret.damage; this.fireRate = e.turret.fireRate;
-            this.detectionRange = e.turret.detectionRange; this.shootRange = e.turret.shootRange;
-            this.scoreValue = e.turret.scoreValue;
-        } else if (type === 'bossTurret') {
-            const b = CONFIG.bossTurret;
-            this.health = b.health; this.damage = b.damage; this.fireRate = b.fireRate;
-            this.shootRange = b.shootRange; this.scoreValue = b.scoreValue; this.radius = b.radius;
-            this.detectionRange = 80; this.speed = 0; this.chaseSpeed = 0;
-        } else if (type === 'redFalcon') {
-            const b = CONFIG.redFalcon;
-            this.health = b.health; this.damage = b.damage; this.fireRate = b.fireRate;
-            this.shootRange = b.shootRange; this.scoreValue = b.scoreValue; this.radius = b.radius;
-            this.detectionRange = 100; this.speed = 1.5; this.chaseSpeed = 2.5;
+    // ---------- 建模（代码拼装低模） ----------
+    _buildMesh() {
+        const g = new THREE.Group();
+        const mat = (c) => new THREE.MeshLambertMaterial({ color: c });
+        this._mats = [];
+        const M = (c) => { const m = mat(c); this._mats.push(m); return m; };
+        const box = (w, h, d, m, x, y, z) => {
+            const ms = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), m);
+            ms.position.set(x, y, z); g.add(ms); return ms;
+        };
+        if (this.type === 'rifleman' || this.type === 'sniper') {
+            const uni = this.type === 'sniper' ? 0x5a4a6a : 0x4a5a2a;
+            box(0.55, 0.7, 0.35, M(uni), 0, 1.05, 0);
+            box(0.32, 0.32, 0.32, M(0xc9a06a), 0, 1.58, 0);
+            box(0.38, 0.12, 0.38, M(0x556633), 0, 1.76, 0);
+            box(0.18, 0.6, 0.18, M(0x3a3a1a), -0.14, 0.3, 0);
+            box(0.18, 0.6, 0.18, M(0x3a3a1a), 0.14, 0.3, 0);
+            const gun = box(0.08, 0.1, this.type === 'sniper' ? 0.95 : 0.55, M(0x222222), 0.3, 1.15, 0.3);
+            if (this.type === 'sniper') gun.position.z = 0.5;
+        } else if (this.type === 'runner') {
+            box(0.5, 0.65, 0.32, M(0x8a2020), 0, 1.0, 0);
+            box(0.3, 0.3, 0.3, M(0xc9a06a), 0, 1.5, 0);
+            box(0.33, 0.1, 0.33, M(0xcc1010), 0, 1.62, 0);
+            box(0.17, 0.55, 0.17, M(0x5a1010), -0.13, 0.27, 0);
+            box(0.17, 0.55, 0.17, M(0x5a1010), 0.13, 0.27, 0);
+            box(0.04, 0.04, 0.3, M(0xaaaaaa), 0.25, 1.0, 0.25);
+        } else if (this.type === 'mortar') {
+            box(0.6, 0.75, 0.4, M(0x6a5a2a), 0, 1.05, 0);
+            box(0.32, 0.32, 0.32, M(0xc9a06a), 0, 1.6, 0);
+            box(0.38, 0.14, 0.38, M(0x776644), 0, 1.78, 0);
+            box(0.18, 0.6, 0.18, M(0x4a3a1a), -0.15, 0.3, 0);
+            box(0.18, 0.6, 0.18, M(0x4a3a1a), 0.15, 0.3, 0);
+            const tube = new THREE.Mesh(new THREE.CylinderGeometry(0.11, 0.13, 0.8, 8), M(0x333333));
+            tube.position.set(0.45, 0.75, 0.2); tube.rotation.z = -0.5; g.add(tube);
+            box(0.5, 0.25, 0.5, M(0x444444), 0.45, 0.12, 0.2);
+        } else if (this.type === 'turret') {
+            const base = new THREE.Mesh(new THREE.CylinderGeometry(0.85, 1.05, 0.6, 8), M(0x555555));
+            base.position.y = 0.3; g.add(base);
+            const head = new THREE.Group(); head.position.y = 0.95; g.add(head);
+            this.headGroup = head;
+            const hb = new THREE.Mesh(new THREE.BoxGeometry(1.05, 0.65, 0.85), M(0x445544));
+            head.add(hb);
+            const bMat = M(0x222222);
+            [-0.22, 0.22].forEach((bx) => {
+                const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.08, 0.75, 6), bMat);
+                barrel.rotation.x = Math.PI / 2; barrel.position.set(bx, 0, 0.55); head.add(barrel);
+            });
+            const eye = new THREE.Mesh(new THREE.SphereGeometry(0.1, 6, 6), new THREE.MeshBasicMaterial({ color: 0xff2222 }));
+            eye.position.set(0, 0.12, 0.43); head.add(eye);
+        } else if (this.type === 'roller') {
+            const ball = new THREE.Mesh(new THREE.SphereGeometry(0.45, 10, 8), M(0x3a3a3a));
+            ball.position.y = 0.45; g.add(ball); this.rollerBall = ball;
+            const eye = new THREE.Mesh(new THREE.SphereGeometry(0.12, 6, 6), new THREE.MeshBasicMaterial({ color: 0xff2222 }));
+            eye.position.set(0, 0.55, 0.38); g.add(eye);
+            for (let i = 0; i < 6; i++) {
+                const a = (i / 6) * Math.PI * 2;
+                const spike = new THREE.Mesh(new THREE.ConeGeometry(0.08, 0.25, 5), M(0x777777));
+                spike.position.set(Math.cos(a) * 0.45, 0.45 + Math.sin(a) * 0.45, 0);
+                spike.rotation.z = -a + Math.PI / 2;
+                g.add(spike);
+            }
+        } else if (this.type === 'spore') {
+            const bodyM = M(0x7a2a4a);
+            const body = new THREE.Mesh(new THREE.SphereGeometry(0.42, 8, 7), bodyM);
+            body.position.y = 0.55; body.scale.y = 0.85; g.add(body);
+            const eyeM = new THREE.MeshBasicMaterial({ color: 0xffff66 });
+            [-0.15, 0.15].forEach((ex) => {
+                const eye = new THREE.Mesh(new THREE.SphereGeometry(0.07, 6, 6), eyeM);
+                eye.position.set(ex, 0.68, 0.34); g.add(eye);
+            });
+            for (let i = 0; i < 4; i++) {
+                const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.07, 0.55, 5), M(0x4a1030));
+                const a = (i / 4) * Math.PI * 2 + 0.4;
+                leg.position.set(Math.cos(a) * 0.35, 0.25, Math.sin(a) * 0.35);
+                leg.rotation.z = Math.cos(a) * 0.5; leg.rotation.x = -Math.sin(a) * 0.5;
+                g.add(leg);
+            }
+        } else if (this.type === 'tank') {
+            const hull = box(3.6, 1.1, 2.4, M(0x5a4a6a), 0, 0.95, 0);
+            hull.name = 'hull';
+            box(3.9, 0.5, 2.7, M(0x333340), 0, 0.3, 0);
+            const tur = new THREE.Group(); tur.position.set(0, 1.7, 0); g.add(tur);
+            this.headGroup = tur;
+            const tb = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.7, 1.4), M(0x6a5a7a));
+            tur.add(tb);
+            const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.13, 0.13, 1.5, 8), M(0x222222));
+            barrel.rotation.x = Math.PI / 2; barrel.position.set(0, 0, 1.2); tur.add(barrel);
+            const eye = new THREE.Mesh(new THREE.SphereGeometry(0.14, 6, 6), new THREE.MeshBasicMaterial({ color: 0xff2222 }));
+            eye.position.set(0, 0.2, 0.72); tur.add(eye);
         }
-        this.maxHealth = this.health;
+        return g;
     }
 
-    // ===== 模型创建 =====
-    _createMesh(type) {
+    _buildHealthBar() {
+        const isBig = this.type === 'tank';
+        const w = isBig ? 3.4 : 1.15;
         const group = new THREE.Group();
-        if (type === 'soldier') this._buildSoldier(group);
-        else if (type === 'runner') this._buildRunner(group);
-        else if (type === 'turret') this._buildTurret(group);
-        else if (type === 'bossTurret') this._buildBossTurret(group);
-        else if (type === 'redFalcon') this._buildRedFalcon(group);
-        else this._buildSoldier(group);
-        return group;
-    }
-
-    _buildSoldier(group) {
-        // 魂斗罗敌兵：绿色军装 + 钢盔
-        const uniformMat = new THREE.MeshLambertMaterial({ color: 0x4a5a2a });
-        this._bodyMats.push(uniformMat);
-        const body = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.7, 0.35), uniformMat);
-        body.position.y = 1.05;
-        group.add(body);
-
-        // 头
-        const skinMat = new THREE.MeshLambertMaterial({ color: 0xc9a06a });
-        this._bodyMats.push(skinMat);
-        const head = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.32, 0.32), skinMat);
-        head.position.y = 1.6;
-        group.add(head);
-
-        // 钢盔
-        const helmetMat = new THREE.MeshLambertMaterial({ color: 0x556633 });
-        this._bodyMats.push(helmetMat);
-        const helmet = new THREE.Mesh(new THREE.BoxGeometry(0.38, 0.12, 0.38), helmetMat);
-        helmet.position.y = 1.78;
-        group.add(helmet);
-
-        // 腿
-        const legMat = new THREE.MeshLambertMaterial({ color: 0x3a3a1a });
-        this._bodyMats.push(legMat);
-        const legL = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.6, 0.18), legMat);
-        legL.position.set(-0.14, 0.3, 0);
-        group.add(legL);
-        const legR = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.6, 0.18), legMat);
-        legR.position.set(0.14, 0.3, 0);
-        group.add(legR);
-
-        // 枪
-        const gunMat = new THREE.MeshLambertMaterial({ color: 0x222222 });
-        const gun = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.1, 0.55), gunMat);
-        gun.position.set(0.3, 1.15, 0.2);
-        group.add(gun);
-    }
-
-    _buildRunner(group) {
-        // 冲锋兵：红色装束，速度快，不射击
-        const uniformMat = new THREE.MeshLambertMaterial({ color: 0x8a2020 });
-        this._bodyMats.push(uniformMat);
-        const body = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.65, 0.32), uniformMat);
-        body.position.y = 1.0;
-        group.add(body);
-
-        const skinMat = new THREE.MeshLambertMaterial({ color: 0xc9a06a });
-        this._bodyMats.push(skinMat);
-        const head = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.3, 0.3), skinMat);
-        head.position.y = 1.5;
-        group.add(head);
-
-        // 红色头巾
-        const bandMat = new THREE.MeshLambertMaterial({ color: 0xcc1010 });
-        this._bodyMats.push(bandMat);
-        const band = new THREE.Mesh(new THREE.BoxGeometry(0.33, 0.1, 0.33), bandMat);
-        band.position.y = 1.62;
-        group.add(band);
-
-        const legMat = new THREE.MeshLambertMaterial({ color: 0x5a1010 });
-        this._bodyMats.push(legMat);
-        const legL = new THREE.Mesh(new THREE.BoxGeometry(0.17, 0.55, 0.17), legMat);
-        legL.position.set(-0.13, 0.27, 0);
-        group.add(legL);
-        const legR = new THREE.Mesh(new THREE.BoxGeometry(0.17, 0.55, 0.17), legMat);
-        legR.position.set(0.13, 0.27, 0);
-        group.add(legR);
-
-        // 匕首
-        const knifeMat = new THREE.MeshLambertMaterial({ color: 0xaaaaaa });
-        const knife = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.04, 0.3), knifeMat);
-        knife.position.set(0.25, 1.0, 0.25);
-        group.add(knife);
-    }
-
-    _buildTurret(group) {
-        // 固定炮台：底座 + 双管
-        const baseMat = new THREE.MeshLambertMaterial({ color: 0x555555 });
-        this._bodyMats.push(baseMat);
-        const base = new THREE.Mesh(new THREE.CylinderGeometry(0.8, 1.0, 0.6, 8), baseMat);
-        base.position.y = 0.3;
-        group.add(base);
-
-        // 炮塔主体
-        const turretMat = new THREE.MeshLambertMaterial({ color: 0x444444 });
-        this._bodyMats.push(turretMat);
-        const turret = new THREE.Mesh(new THREE.BoxGeometry(1.0, 0.7, 0.8), turretMat);
-        turret.position.y = 1.0;
-        group.add(turret);
-
-        // 双管
-        const barrelMat = new THREE.MeshLambertMaterial({ color: 0x222222 });
-        const barrelL = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.08, 0.7, 6), barrelMat);
-        barrelL.rotation.x = Math.PI / 2;
-        barrelL.position.set(-0.2, 1.0, 0.55);
-        group.add(barrelL);
-        const barrelR = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.08, 0.7, 6), barrelMat);
-        barrelR.rotation.x = Math.PI / 2;
-        barrelR.position.set(0.2, 1.0, 0.55);
-        group.add(barrelR);
-
-        // 红色瞄准眼
-        const eyeMat = new THREE.MeshBasicMaterial({ color: 0xff0000 });
-        const eye = new THREE.Mesh(new THREE.SphereGeometry(0.1, 6, 6), eyeMat);
-        eye.position.set(0, 1.15, 0.4);
-        group.add(eye);
-    }
-
-    _buildBossTurret(group) {
-        // 大型炮台Boss：巨型底座 + 多管 + 装甲
-        const baseMat = new THREE.MeshLambertMaterial({ color: 0x6a1a1a });
-        this._bodyMats.push(baseMat);
-        const base = new THREE.Mesh(new THREE.CylinderGeometry(2.5, 3.0, 1.2, 8), baseMat);
-        base.position.y = 0.6;
-        group.add(base);
-
-        // 装甲主体
-        const armorMat = new THREE.MeshLambertMaterial({ color: 0x8a2a2a });
-        this._bodyMats.push(armorMat);
-        const armor = new THREE.Mesh(new THREE.BoxGeometry(3, 2, 2), armorMat);
-        armor.position.y = 2.0;
-        group.add(armor);
-
-        // 三管炮
-        const barrelMat = new THREE.MeshLambertMaterial({ color: 0x1a1a1a });
-        for (let i = 0; i < 3; i++) {
-            const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.2, 1.2, 8), barrelMat);
-            barrel.rotation.x = Math.PI / 2;
-            barrel.position.set((i - 1) * 0.5, 2.2, 1.3);
-            group.add(barrel);
-        }
-
-        // 红色核心
-        const coreMat = new THREE.MeshBasicMaterial({ color: 0xff3300 });
-        const core = new THREE.Mesh(new THREE.SphereGeometry(0.4, 8, 8), coreMat);
-        core.position.set(0, 2.5, 0.8);
-        group.add(core);
-
-        // 炮塔可旋转部分引用
-        this._turretHead = armor;
-    }
-
-    _buildRedFalcon(group) {
-        // 红隼：巨型异星生物，多眼 + 触手 + 红色甲壳
-        // 主体（甲壳）
-        const shellMat = new THREE.MeshLambertMaterial({ color: 0x8a0a2a, emissive: 0x2a0008 });
-        this._bodyMats.push(shellMat);
-        const shell = new THREE.Mesh(new THREE.SphereGeometry(1.8, 10, 8), shellMat);
-        shell.position.y = 2.5;
-        shell.scale.y = 0.8;
-        group.add(shell);
-
-        // 头部
-        const headMat = new THREE.MeshLambertMaterial({ color: 0xaa1a3a, emissive: 0x330011 });
-        this._bodyMats.push(headMat);
-        const head = new THREE.Mesh(new THREE.SphereGeometry(1.0, 8, 8), headMat);
-        head.position.y = 3.8;
-        group.add(head);
-
-        // 多眼
-        const eyeMat = new THREE.MeshBasicMaterial({ color: 0xffff00 });
-        const eyePositions = [
-            [-0.35, 3.9, 0.7], [0.35, 3.9, 0.7], [0, 4.1, 0.6],
-            [-0.2, 3.7, 0.85], [0.2, 3.7, 0.85],
-        ];
-        eyePositions.forEach(pos => {
-            const eye = new THREE.Mesh(new THREE.SphereGeometry(0.14, 6, 6), eyeMat);
-            eye.position.set(pos[0], pos[1], pos[2]);
-            group.add(eye);
-        });
-
-        // 触手/臂
-        const armMat = new THREE.MeshLambertMaterial({ color: 0x6a0a1a });
-        this._bodyMats.push(armMat);
-        for (let i = 0; i < 4; i++) {
-            const angle = (i / 4) * Math.PI * 2;
-            const arm = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.35, 2.2, 6), armMat);
-            arm.position.set(Math.cos(angle) * 1.8, 2.2, Math.sin(angle) * 1.8);
-            arm.rotation.z = Math.cos(angle) * 0.4;
-            arm.rotation.x = Math.sin(angle) * 0.4;
-            group.add(arm);
-        }
-
-        // 下部支撑腿
-        const legMat = new THREE.MeshLambertMaterial({ color: 0x4a0a1a });
-        this._bodyMats.push(legMat);
-        for (let i = 0; i < 3; i++) {
-            const angle = (i / 3) * Math.PI * 2;
-            const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.5, 1.5, 6), legMat);
-            leg.position.set(Math.cos(angle) * 1.2, 0.75, Math.sin(angle) * 1.2);
-            group.add(leg);
-        }
-
-        // 嘴/獠牙
-        const mouthMat = new THREE.MeshLambertMaterial({ color: 0x1a0000 });
-        const mouth = new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.3, 0.4), mouthMat);
-        mouth.position.set(0, 3.5, 0.8);
-        group.add(mouth);
-    }
-
-    _createHealthBar() {
-        const isBoss = this.type === 'bossTurret' || this.type === 'redFalcon';
-        const w = isBoss ? 4 : 1.2;
-        const barHeight = 0.12;
-        const group = new THREE.Group();
-
-        const bg = new THREE.Mesh(
-            new THREE.PlaneGeometry(w, barHeight),
-            new THREE.MeshBasicMaterial({ color: 0x330000, transparent: true, opacity: 0.7 })
-        );
-        bg.position.z = 0.01;
+        const bg = new THREE.Mesh(new THREE.PlaneGeometry(w, 0.13), new THREE.MeshBasicMaterial({ color: 0x220000, transparent: true, opacity: 0.75, depthWrite: false }));
         group.add(bg);
-
-        const fill = new THREE.Mesh(
-            new THREE.PlaneGeometry(w, barHeight),
-            new THREE.MeshBasicMaterial({ color: 0xff3333 })
-        );
-        fill.position.z = 0.02;
-        group.add(fill);
-        this.healthBarFill = fill;
-
-        this.healthBar = group;
-        this.healthBar.visible = false;
-        this.scene.add(this.healthBar);
+        const fill = new THREE.Mesh(new THREE.PlaneGeometry(w, 0.13), new THREE.MeshBasicMaterial({ color: 0xff4444, depthWrite: false }));
+        fill.position.z = 0.01; group.add(fill);
+        this.hpFill = fill; this.hpW = w;
+        this.hpBar = group;
+        group.visible = false;
+        this.scene.add(group);
     }
 
-    _showHitEffect(point) {
-        if (this._hitFlash) {
-            this.scene.remove(this._hitFlash);
-            this._hitFlash = null;
-        }
-        const flash = new THREE.Mesh(
-            new THREE.SphereGeometry(0.3, 6, 6),
-            new THREE.MeshBasicMaterial({ color: 0xffff00, transparent: true, opacity: 0.9 })
-        );
-        flash.position.copy(point);
-        this.scene.add(flash);
-        this.hitFlashTimer = 0.15;
-        this._hitFlash = flash;
-    }
-
-    // 命中闪白（身体材质）
-    _flashBody() {
-        for (const mat of this._bodyMats) {
-            mat.emissive = new THREE.Color(0x666666);
-        }
-    }
-    _unflashBody() {
-        for (const mat of this._bodyMats) {
-            mat.emissive = new THREE.Color(0x000000);
-        }
-    }
-
-    takeDamage(amount) {
+    onHit(dmg) {
         if (!this.alive) return;
-        this.health -= amount;
-        this.hitFlashTimer = 0.1;
-        this._flashBody();
-        setTimeout(() => { if (this.alive) this._unflashBody(); }, 80);
-        if (this.health <= 0) {
-            this._die();
-        }
+        this.hp -= dmg;
+        this._flashT = 0.08;
+        this._mats.forEach((m) => { if (m.emissive) m.emissive.setHex(0x555555); });
+        if (this.hp <= 0) this._die();
     }
 
     _die() {
         this.alive = false;
-        this.state = 'dead';
-        this.deathTimer = 2.0;
+        this.deathT = 0.85;
         AudioManager.enemyDie();
-        if (this.player) this.player.addScore(this.scoreValue);
-        this._deathAnimProgress = 0;
-
-        // Boss 死亡特效
-        if (this.type === 'bossTurret' || this.type === 'redFalcon') {
-            this._spawnDeathExplosion();
+        if (!this._scored) { this._scored = true; this.ctx.onScore(this.scoreValue); }
+        if (this.hpBar) this.hpBar.visible = false;
+        if (this.type === 'roller') {
+            // 滚雷被打爆也在原地炸开（不伤玩家除非贴身）
+            this.ctx.projectiles.spawnExplosionFX(new THREE.Vector3(this.position.x, this.position.y + 0.5, this.position.z), 1.8);
         }
     }
 
-    _spawnDeathExplosion() {
-        // 简单爆炸：多个红色球扩散
-        for (let i = 0; i < 8; i++) {
-            const ball = new THREE.Mesh(
-                new THREE.SphereGeometry(0.4, 6, 6),
-                new THREE.MeshBasicMaterial({ color: 0xff4400, transparent: true, opacity: 0.9 })
-            );
-            ball.position.set(this.position.x, 1.5, this.position.z);
-            this.scene.add(ball);
-            const angle = (i / 8) * Math.PI * 2;
-            const vx = Math.cos(angle) * 4;
-            const vy = Math.random() * 5 + 2;
-            const vz = Math.sin(angle) * 4;
-            const start = performance.now();
-            const animate = () => {
-                const t = (performance.now() - start) / 1000;
-                if (t > 0.8) { this.scene.remove(ball); return; }
-                ball.position.x += vx * 0.016;
-                ball.position.y += vy * 0.016;
-                ball.position.z += vz * 0.016;
-                vy -= 15 * 0.016;
-                ball.material.opacity = 0.9 * (1 - t / 0.8);
-                requestAnimationFrame(animate);
-            };
-            animate();
-        }
+    _muzzlePos(h) {
+        const fx = Math.sin(this.facing), fz = Math.cos(this.facing);
+        return new THREE.Vector3(this.position.x + fx * 0.6, this.position.y + h, this.position.z + fz * 0.6);
     }
 
-    update(deltaTime, player) {
+    _fireOrb(player, speed, height, inaccuracy) {
+        const from = this._muzzlePos(height);
+        const target = new THREE.Vector3(
+            player.position.x + Utils.randomRange(-inaccuracy, inaccuracy),
+            player.chestY + Utils.randomRange(-0.15, 0.25),
+            player.position.z + Utils.randomRange(-inaccuracy, inaccuracy)
+        );
+        const dir = target.sub(from).normalize();
+        this.ctx.projectiles.spawnOrb(from, dir, speed, 1);
+        AudioManager.enemyShoot();
+    }
+
+    _fireGrenade(player) {
+        const from = this._muzzlePos(1.1);
+        const T = 1.35, G = 16;
+        const dx = player.position.x - from.x, dz = player.position.z - from.z;
+        const dy = (player.position.y + 0.3) - from.y;
+        const vel = new THREE.Vector3(dx / T, (dy + 0.5 * G * T * T) / T, dz / T);
+        this.ctx.projectiles.spawnGrenade(from, vel, false);
+        AudioManager.enemyShoot();
+    }
+
+    /** 返回 true 表示可清理 */
+    update(dt, player, cameraPos) {
         if (!this.alive) {
-            if (this.deathTimer > 0) {
-                this.deathTimer -= deltaTime;
-                this._deathAnimProgress = (2.0 - this.deathTimer) / 2.0;
-                this.mesh.rotation.x = this._deathAnimProgress * Math.PI / 2;
-                this.mesh.position.y = this.position.y * (1 - this._deathAnimProgress * 0.5);
-            }
-            if (this._hitFlash) {
-                this._hitFlash.material.opacity -= deltaTime * 6;
-                if (this._hitFlash.material.opacity <= 0) {
-                    this.scene.remove(this._hitFlash);
-                    this._hitFlash = null;
-                }
-            }
-            return;
+            this.deathT -= dt;
+            const k = Math.max(0, this.deathT / 0.85);
+            this.mesh.rotation.x = (1 - k) * (Math.PI / 2) * 0.9;
+            this.mesh.position.y = this.position.y - (1 - k) * 0.35;
+            return this.deathT <= 0;
         }
-
-        const distToPlayer = Utils.dist(this.position, player.position);
-
-        // 检测玩家
-        if (distToPlayer < this.detectionRange) {
-            this.state = 'chase';
-            this.lastSeenTime = performance.now();
-        } else if (this.state === 'chase' && performance.now() - this.lastSeenTime > 5000) {
-            this.state = 'patrol';
-            this._setNewPatrolTarget();
+        this.t += dt;
+        if (this._flashT > 0) {
+            this._flashT -= dt;
+            if (this._flashT <= 0) this._mats.forEach((m) => { if (m.emissive) m.emissive.setHex(0x000000); });
         }
+        if (this.meleeTimer > 0) this.meleeTimer -= dt;
 
-        // 状态机
-        if (this.state === 'patrol') {
-            this._patrol(deltaTime);
-        } else if (this.state === 'chase') {
-            this._chase(deltaTime, player, distToPlayer);
-        }
-
-        // 血条
-        if (this.healthBar) {
-            const isBoss = this.type === 'bossTurret' || this.type === 'redFalcon';
-            const showDist = isBoss ? 100 : 30;
-            this.healthBar.visible = distToPlayer < showDist;
-            if (this.healthBar.visible) {
-                const pct = this.health / this.maxHealth;
-                this.healthBarFill.scale.x = pct;
-                this.healthBarFill.position.x = -(1 - pct) * (isBoss ? 2 : 0.6);
-                this.healthBar.position.set(this.mesh.position.x, isBoss ? 5.5 : 2.1, this.mesh.position.z);
-                this.healthBar.lookAt(player.camera.position);
-            }
-        }
-
-        // 命中闪光
-        if (this.hitFlashTimer > 0) {
-            this.hitFlashTimer -= deltaTime;
-            if (this._hitFlash) {
-                this._hitFlash.material.opacity = (this.hitFlashTimer / 0.15) * 0.9;
-            }
-        }
-
-        // Boss 旋转炮塔朝向玩家
-        if (this.type === 'bossTurret' && this._turretHead) {
-            const dx = player.position.x - this.position.x;
-            const dz = player.position.z - this.position.z;
-            this._turretHead.rotation.y = Math.atan2(dx, dz);
-        }
-    }
-
-    _setNewPatrolTarget() {
-        const range = 15;
-        const half = this.level.size / 2 - 5;
-        this.patrolTarget = {
-            x: Utils.clamp(this.position.x + Utils.randomRange(-range, range), -half, half),
-            z: Utils.clamp(this.position.z + Utils.randomRange(-range, range), -half, half),
-        };
-        this.patrolTimer = Utils.randomRange(5, 15);
-    }
-
-    _patrol(deltaTime) {
-        this.patrolTimer -= deltaTime;
-        if (this.patrolTimer <= 0) this._setNewPatrolTarget();
-
-        const dx = this.patrolTarget.x - this.position.x;
-        const dz = this.patrolTarget.z - this.position.z;
-        const dist = Math.sqrt(dx * dx + dz * dz);
-        if (dist > 1) {
-            this.position.x += (dx / dist) * this.speed * deltaTime;
-            this.position.z += (dz / dist) * this.speed * deltaTime;
-            this.facing = Math.atan2(dx, dz);
-        }
-        this._updateMesh();
-    }
-
-    _chase(deltaTime, player, distToPlayer) {
         const dx = player.position.x - this.position.x;
         const dz = player.position.z - this.position.z;
         const dist = Math.sqrt(dx * dx + dz * dz);
+        const d = ENEMY_DATA[this.type];
+        this.facing = Math.atan2(dx, dz);
 
-        if (this.type === 'runner') {
-            // 近战冲锋：冲到玩家身边攻击
-            if (dist > this.meleeRange) {
-                this.position.x += (dx / dist) * this.chaseSpeed * deltaTime;
-                this.position.z += (dz / dist) * this.chaseSpeed * deltaTime;
-                this.facing = Math.atan2(dx, dz);
-            } else {
-                // 近战攻击
-                const now = performance.now();
-                if (now - this.lastShotTime > 800) {
-                    this.lastShotTime = now;
-                    player.takeDamage(this.damage);
-                    AudioManager.hurt();
+        switch (this.type) {
+            case 'rifleman': {
+                this.fireTimer -= dt;
+                if (this.fireTimer <= 0 && dist < d.range && player.alive) {
+                    this.fireTimer = d.fireInterval * Utils.randomRange(0.85, 1.2);
+                    this._fireOrb(player, d.orbSpeed, 1.25, 0.5);
                 }
+                break;
             }
-        } else if (this.type === 'turret' || this.type === 'bossTurret' || this.type === 'redFalcon') {
-            // 固定/慢速Boss：原地射击
-            if (this.type === 'redFalcon' && dist > 15) {
-                this.position.x += (dx / dist) * this.chaseSpeed * deltaTime;
-                this.position.z += (dz / dist) * this.chaseSpeed * deltaTime;
-                this.facing = Math.atan2(dx, dz);
-            }
-            this._tryShoot(player, distToPlayer);
-        } else {
-            // soldier：保持距离射击，太近则后退
-            if (dist > this.shootRange * 0.6) {
-                this.position.x += (dx / dist) * this.chaseSpeed * deltaTime;
-                this.position.z += (dz / dist) * this.chaseSpeed * deltaTime;
-                this.facing = Math.atan2(dx, dz);
-            } else if (dist < this.shootRange * 0.3) {
-                this.position.x -= (dx / dist) * this.speed * deltaTime;
-                this.position.z -= (dz / dist) * this.speed * deltaTime;
-                this.facing = Math.atan2(dx, dz);
-            }
-            this._tryShoot(player, distToPlayer);
-        }
-
-        this._updateMesh();
-    }
-
-    _tryShoot(player, dist) {
-        if (dist > this.shootRange) return;
-        const now = performance.now();
-
-        // 点射模式（turret/boss）
-        if (this.type === 'turret' || this.type === 'bossTurret' || this.type === 'redFalcon') {
-            if (this.burstCooldown > 0) {
-                this.burstCooldown -= 1 / 60; // 粗略递减
-            }
-            if (this.burstCount > 0) {
-                if (now - this.lastShotTime < this.fireRate * 1000) return;
-                this.lastShotTime = now;
-                this._fireBurst(player, dist);
-                this.burstCount--;
-                return;
-            }
-            if (this.burstCooldown <= 0) {
-                this.burstCount = this.type === 'redFalcon' ? 5 : (this.type === 'bossTurret' ? 3 : 3);
-                this.burstCooldown = this.type === 'redFalcon' ? 1.6 : (this.type === 'bossTurret' ? 1.4 : 1.8);
-            }
-            return;
-        }
-
-        // soldier 单发
-        if (now - this.lastShotTime < this.fireRate * 1000) return;
-        this.lastShotTime = now;
-        this._fireSingle(player, dist);
-    }
-
-    _fireSingle(player, dist) {
-        const hitChance = Utils.clamp(0.55 - dist / 100, 0.1, 0.5);
-        const from = new THREE.Vector3(this.position.x, 1.2, this.position.z);
-        const to = player.camera.position.clone();
-
-        if (Math.random() < hitChance) {
-            player.takeDamage(this.damage * Utils.randomRange(0.8, 1.2));
-        }
-
-        AudioManager.shoot(180, 'sawtooth');
-        this._createTracer(from, to, 0xff4444);
-    }
-
-    _fireBurst(player, dist) {
-        const from = new THREE.Vector3(this.position.x, this.type === 'redFalcon' ? 3.5 : 2.2, this.position.z);
-        const to = player.camera.position.clone();
-
-        // Boss 散射
-        if (this.type === 'bossTurret' || this.type === 'redFalcon') {
-            const spread = this.type === 'redFalcon' ? 5 : 3;
-            for (let i = 0; i < spread; i++) {
-                const angle = (i - (spread - 1) / 2) * 0.25;
-                const dir = to.clone().sub(from).normalize();
-                const right = new THREE.Vector3(1, 0, 0);
-                right.applyQuaternion(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), this.facing));
-                dir.add(right.multiplyScalar(angle));
-                dir.normalize();
-                const end = from.clone().add(dir.multiplyScalar(60));
-
-                const hitChance = Utils.clamp(0.4 - dist / 120, 0.08, 0.35);
-                if (Math.random() < hitChance) {
-                    player.takeDamage(this.damage * Utils.randomRange(0.8, 1.2));
+            case 'sniper': {
+                this.fireTimer -= dt;
+                if (this.fireTimer <= 0 && dist < d.range && player.alive) {
+                    this.fireTimer = d.fireInterval;
+                    this._fireOrb(player, d.orbSpeed, 1.3, 0.25);
                 }
-                this._createTracer(from, end, 0xff3300);
+                break;
             }
-        } else {
-            // turret 单发点射
-            const hitChance = Utils.clamp(0.5 - dist / 100, 0.1, 0.45);
-            if (Math.random() < hitChance) {
-                player.takeDamage(this.damage * Utils.randomRange(0.8, 1.2));
+            case 'mortar': {
+                this.fireTimer -= dt;
+                if (this.fireTimer <= 0 && dist < d.range && player.alive) {
+                    this.fireTimer = d.fireInterval * Utils.randomRange(0.9, 1.15);
+                    this._fireGrenade(player);
+                }
+                break;
             }
-            this._createTracer(from, to, 0xff4444);
+            case 'turret': {
+                if (this.headGroup) this.headGroup.rotation.y = this.facing - this.mesh.rotation.y;
+                if (dist < d.range && player.alive) {
+                    if (this.burstLeft > 0) {
+                        this.fireTimer -= dt;
+                        if (this.fireTimer <= 0) {
+                            this.fireTimer = d.fireInterval;
+                            this.burstLeft--;
+                            this._fireOrb(player, d.orbSpeed, 1.05, 0.4);
+                        }
+                    } else {
+                        this.fireTimer -= dt;
+                        if (this.fireTimer <= 0) { this.burstLeft = d.burst; this.fireTimer = 0; }
+                    }
+                    if (this.burstLeft === 0 && this.fireTimer <= 0) this.fireTimer = d.burstPause;
+                }
+                break;
+            }
+            case 'runner':
+            case 'spore': {
+                const meleeR = d.meleeRange || 1.6;
+                if (dist > meleeR && player.alive) {
+                    const sp = d.speed || 5;
+                    this.position.x += (dx / dist) * sp * dt;
+                    this.position.z += (dz / dist) * sp * dt;
+                } else if (player.alive && this.meleeTimer <= 0) {
+                    this.meleeTimer = d.meleeCooldown || 0.9;
+                    player.takeDamage(1);
+                }
+                break;
+            }
+            case 'roller': {
+                if (player.alive && dist > 0.01) {
+                    const sp = d.speed;
+                    this.position.x += (dx / dist) * sp * dt;
+                    this.position.z += (dz / dist) * sp * dt;
+                }
+                if (this.rollerBall) this.rollerBall.rotation.x -= dt * 9;
+                if (dist < (d.explodeRange || 1.9) && player.alive) {
+                    this.ctx.projectiles.spawnExplosionFX(new THREE.Vector3(this.position.x, this.position.y + 0.5, this.position.z), 2.3);
+                    if (dist < 2.4) player.takeDamage(1);
+                    this.hp = 0; this._die();
+                }
+                break;
+            }
+            case 'tank': {
+                // 在关底前横向巡逻，炮口对玩家三连散射
+                this.position.x = Math.sin(this.t * 0.45) * 7.5;
+                if (this.headGroup) this.headGroup.rotation.y = this.facing - this.mesh.rotation.y;
+                this.fireTimer -= dt;
+                if (this.fireTimer <= 0 && dist < d.range && player.alive) {
+                    this.fireTimer = d.fireInterval;
+                    for (let i = -1; i <= 1; i++) {
+                        const from = this._muzzlePos(1.8);
+                        const dir = new THREE.Vector3(dx, (player.chestY - from.y), dz).normalize();
+                        const right = new THREE.Vector3(-dir.z, 0, dir.x);
+                        dir.addScaledVector(right, i * 0.12).normalize();
+                        this.ctx.projectiles.spawnOrb(from, dir, d.orbSpeed, 1);
+                    }
+                    AudioManager.enemyShoot();
+                }
+                break;
+            }
         }
 
-        AudioManager.shoot(this.type === 'redFalcon' ? 120 : 160, 'sawtooth');
-    }
-
-    _createTracer(from, to, color) {
-        const geo = new THREE.BufferGeometry().setFromPoints([from, to]);
-        const mat = new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.5 });
-        const line = new THREE.Line(geo, mat);
-        this.scene.add(line);
-        setTimeout(() => { if (this.scene) this.scene.remove(line); }, 150);
-    }
-
-    _updateMesh() {
+        // 同步变换与可击点
         this.mesh.position.set(this.position.x, this.position.y, this.position.z);
-        this.mesh.rotation.y = this.facing;
+        this.mesh.rotation.y = (this.type === 'turret' || this.type === 'tank') ? 0 : this.facing;
+        if (this.type === 'spore') this.mesh.position.y = this.position.y + Math.abs(Math.sin(this.t * 9)) * 0.22;
+        this.hitX = this.position.x; this.hitZ = this.position.z;
+        this.hitY = this.position.y + (this.type === 'tank' ? 1.7 : this.type === 'turret' ? 0.95 : 1.0);
+
+        // 血条
+        if (this.hpBar) {
+            const show = this.hp < this.maxHp && dist < 55;
+            this.hpBar.visible = show;
+            if (show) {
+                const pct = Math.max(0, this.hp / this.maxHp);
+                this.hpFill.scale.x = pct;
+                this.hpFill.position.x = -(1 - pct) * this.hpW / 2;
+                this.hpBar.position.set(this.position.x, this.position.y + (this.type === 'tank' ? 3.1 : 2.15), this.position.z);
+                this.hpBar.lookAt(cameraPos);
+            }
+        }
+        return false;
     }
 
     destroy() {
-        if (this.mesh) this.scene.remove(this.mesh);
-        if (this.healthBar) this.scene.remove(this.healthBar);
-        if (this._hitFlash) this.scene.remove(this._hitFlash);
+        if (this.mesh) { this.scene.remove(this.mesh); Utils.disposeObject(this.mesh); }
+        if (this.hpBar) { this.scene.remove(this.hpBar); Utils.disposeObject(this.hpBar); }
     }
 }

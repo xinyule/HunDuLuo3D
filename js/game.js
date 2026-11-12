@@ -1,84 +1,49 @@
 /**
- * 主游戏引擎 — 渲染循环、UI管理、状态机
+ * 主引擎 — 状态机是唯一有权改 state 的地方（旧版阵亡软死的根源即在于此）
+ * 状态：menu / dialog / playing / levelclear / gameover / victory
  */
 const Game = {
-    // 状态: menu, playing, gameover, victory, loading, dialog
     state: 'menu',
     levelIndex: 0,
+    score: 0,
+    lives: CONFIG.player.startLives,
+    _nextExtend: CONFIG.player.extendScore,
 
-    // Three.js 核心
-    scene: null,
-    camera: null,
-    renderer: null,
-    clock: null,
-
-    // 游戏对象
-    input: null,
-    player: null,
-    currentLevel: null,
-
-    // UI 元素
-    hud: null,
+    scene: null, camera: null, renderer: null, clock: null,
+    input: null, cameraRig: null, projectiles: null,
+    player: null, currentLevel: null,
+    checkpoint: { x: 0, y: 0, z: 26 },
+    _dialogCallback: null,
 
     _init() {
         const canvas = document.getElementById('gameCanvas');
-
-        // 场景
         this.scene = new THREE.Scene();
         this.scene.background = new THREE.Color(0x0a0a15);
-
-        // 相机
-        this.camera = new THREE.PerspectiveCamera(
-            CONFIG.renderer.fov,
-            window.innerWidth / window.innerHeight,
-            CONFIG.renderer.near,
-            CONFIG.renderer.far
-        );
-
-        // 渲染器
-        this.renderer = new THREE.WebGLRenderer({
-            canvas,
-            antialias: CONFIG.renderer.antialias,
-        });
+        this.camera = new THREE.PerspectiveCamera(CONFIG.renderer.fov, window.innerWidth / window.innerHeight, CONFIG.renderer.near, CONFIG.renderer.far);
+        this.camera.position.set(0, 3, 38);
+        this.renderer = new THREE.WebGLRenderer({ canvas, antialias: CONFIG.renderer.antialias });
         this.renderer.setSize(window.innerWidth, window.innerHeight);
         this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-
-        // 时钟
         this.clock = new THREE.Clock();
-
-        // 输入管理
         this.input = new InputManager(canvas);
-
-        // 窗口大小调整
+        this.cameraRig = new ThirdPersonCamera(this.camera);
+        this.projectiles = new ProjectileSystem(this.scene);
         window.addEventListener('resize', () => this._onResize());
-
-        // 绑定按钮
         this._bindUI();
-
-        // 菜单背景
         this._addMenuBackground();
-
-        // 开始渲染循环（显示菜单背景）
         this._render();
     },
 
     _bindUI() {
-        document.getElementById('btnStart').addEventListener('click', () => this.startGame());
-        document.getElementById('btnControls').addEventListener('click', () => {
-            document.getElementById('controlsPanel').classList.remove('hidden');
-        });
-        document.getElementById('btnControlsClose').addEventListener('click', () => {
-            document.getElementById('controlsPanel').classList.add('hidden');
-        });
-        document.getElementById('btnRetry').addEventListener('click', () => this.startGame());
-        document.getElementById('btnMenu').addEventListener('click', () => this.showMenu());
-        document.getElementById('btnVictoryRetry').addEventListener('click', () => this.startGame());
-        document.getElementById('btnVictoryMenu').addEventListener('click', () => this.showMenu());
-
-        // 对话框点击继续
-        document.getElementById('dialog').addEventListener('click', () => {
-            if (this._dialogCallback) this._dialogCallback();
-        });
+        const on = (id, fn) => { const el = document.getElementById(id); if (el) el.addEventListener('click', fn); };
+        on('btnStart', () => this.startGame());
+        on('btnControls', () => document.getElementById('controlsPanel').classList.remove('hidden'));
+        on('btnControlsClose', () => document.getElementById('controlsPanel').classList.add('hidden'));
+        on('btnRetry', () => this.startGame());
+        on('btnMenu', () => this.showMenu());
+        on('btnVictoryRetry', () => this.startGame());
+        on('btnVictoryMenu', () => this.showMenu());
+        on('dialog', () => { if (this._dialogCallback) this._dialogCallback(); });
     },
 
     _onResize() {
@@ -89,155 +54,99 @@ const Game = {
 
     _render() {
         requestAnimationFrame(() => this._render());
-        const deltaTime = Math.min(this.clock.getDelta(), 0.1);
-
-        if (this.state === 'playing') {
-            this._updateGame(deltaTime);
-        }
-
-        if (this.renderer && this.scene && this.camera) {
-            this.renderer.render(this.scene, this.camera);
-        }
+        const dt = Math.min(this.clock.getDelta(), 0.05);
+        if (this.state === 'playing') this._updateGame(dt);
+        if (this.renderer && this.scene && this.camera) this.renderer.render(this.scene, this.camera);
     },
 
-    _updateGame(deltaTime) {
-        // 检查玩家是否阵亡
-        if (!this.player.alive) {
-            this._onPlayerDeath();
-            return;
-        }
+    _updateGame(dt) {
+        const player = this.player, level = this.currentLevel;
+        if (!player || !level) return;
+        const aiming = this.input.isAiming() || this.input.isShooting();
+        const shooting = this.input.isShooting();
 
-        // 处理输入
-        // 换弹
-        if (this.input.consumeReload()) {
-            this.player.reload();
-        }
+        player.update(dt, this.input, level, this.input.yaw, aiming);
 
-        // 武器切换
-        const ws = this.input.consumeWeaponSwitch();
-        if (ws !== null && ws !== undefined) {
-            this.player.switchWeapon(ws);
-        }
-
-        // 射击 — 直接调用 player.shoot
-        const w = this.player.getCurrentWeapon();
-        const wantShoot = w.auto ? this.input.isShooting() : this.input.consumeShoot();
-        if (wantShoot) {
-            this.player.shoot(this.currentLevel.enemies);
-        }
-
-        // 更新玩家
-        this.player.update(deltaTime, this.input, this.currentLevel);
-
-        // 更新关卡（敌人AI等）
-        this.currentLevel.update(deltaTime);
-
-        // 更新触屏武器切换高亮
-        this._updateWeaponSwitchUI();
-    },
-
-    _updateWeaponSwitchUI() {
-        const btns = document.querySelectorAll('.ws-btn');
-        btns.forEach((btn, i) => {
-            btn.classList.toggle('active', i === this.player.currentWeapon);
+        const targets = level.getTargets();
+        this.cameraRig.update(dt, {
+            anchor: { x: player.position.x, y: player.position.y, z: player.position.z, prone: player.prone },
+            yaw: this.input.yaw, pitch: this.input.pitch,
+            aiming, colliders: level.colliders, targets,
         });
+
+        if (shooting && player.alive) player.tryShoot(this.projectiles, this.cameraRig.aimPoint);
+
+        level.update(dt, player, this.camera.position);
+        this.projectiles.update(dt, {
+            targets: level.getTargets(), colliders: level.colliders, player,
+            onPlayerHit: (d) => player.takeDamage(d),
+        });
+
+        this._updateHUD();
     },
 
+    // ---------------- 流程 ----------------
     startGame() {
+        this.score = 0;
+        this.lives = CONFIG.player.startLives;
+        this._nextExtend = CONFIG.player.extendScore;
         this.levelIndex = 0;
-        this.state = 'loading';
-        this._showLoading();
-
-        // 清理旧关卡
-        if (this.currentLevel) {
-            this.currentLevel.destroy();
-            this.currentLevel = null;
-        }
-
-        // 清理旧玩家
-        if (this.player) {
-            this.player.destroy();
-            this.player = null;
-        }
-
-        // 清理场景中的旧物体
-        const toRemove = this.scene.children.filter(c => !c.isCamera && !c.isLight && !c.userData.isMenuParticle);
-        for (const obj of toRemove) this.scene.remove(obj);
-
-        // 初始化音频
         AudioManager.init();
-
-        // 加载第一关
-        setTimeout(() => this._loadLevel(0), 1000);
-    },
-
-    _showLoading() {
         document.getElementById('mainMenu').classList.add('hidden');
         document.getElementById('gameOverScreen').classList.add('hidden');
         document.getElementById('victoryScreen').classList.add('hidden');
-        document.getElementById('loadingScreen').classList.remove('hidden');
-        document.getElementById('loadingFill').style.width = '30%';
-        document.getElementById('loadingText').textContent = '加载中...';
+        this._loadLevel(0, true);
     },
 
-    _loadLevel(index) {
-        // 清理旧关卡
-        if (this.currentLevel) {
-            this.currentLevel.destroy();
-            this.currentLevel = null;
+    _loadLevel(index, freshRun) {
+        if (this.currentLevel) { this.currentLevel.destroy(); this.currentLevel = null; }
+        this.projectiles.clear();
+        // 清理菜单粒子等残留
+        const toRemove = this.scene.children.filter((c) => c.userData && c.userData.isMenuParticle);
+        for (const o of toRemove) { this.scene.remove(o); Utils.disposeObject(o); }
+
+        if (!this.player) {
+            this.player = new Player(this.scene);
+            this.player.onDeath = () => this._onPlayerDeath();
+            this.player.onDamaged = () => this._updateHUD();
         }
-        if (this.player) {
-            this.player.destroy();
-            this.player = null;
-        }
+        const data = LEVELS_DATA[index];
+        const spawn = { x: 0, y: 0, z: 26 };
+        this.checkpoint = spawn;
+        this.player.reset(spawn, !freshRun && index > 0);
 
-        // 清理场景中上一关的物体
-        const toRemove = this.scene.children.filter(c => !c.isCamera && !c.isLight && !c.userData.isMenuParticle);
-        for (const obj of toRemove) this.scene.remove(obj);
+        this.currentLevel = new Level(this.scene, data, index, {
+            projectiles: this.projectiles,
+            onScore: (n) => this._addScore(n),
+            onPickup: (letter) => { this.player.applyPickup(letter); this._showCenterMsg(this._pickupText(letter), 1100); this._updateHUD(); },
+            onCheckpoint: (p) => { this.checkpoint = p; },
+            onBossActivated: (boss) => {
+                document.getElementById('bossBar').classList.remove('hidden');
+                document.getElementById('bossName').textContent = 'BOSS · ' + BOSS_DATA[boss.id].name;
+                this._showCenterMsg('⚠ ' + BOSS_DATA[boss.id].name + ' ⚠', 1800);
+            },
+            onBossDefeated: () => this._onBossDefeated(),
+        });
 
-        const levelData = LEVELS_DATA[index];
-        this.currentLevel = new Level(this.scene, levelData, index);
-        this.player = new Player(this.scene, this.camera, this.currentLevel.colliders);
-
-        // 设置输入视角
-        this.input.yaw = 0;
+        this.input.yaw = Math.PI;
         this.input.pitch = 0;
+        this.cameraRig.snapTo({ x: 0, y: 0, z: 26, prone: false }, Math.PI, 0);
 
-        // 更新 UI
-        document.getElementById('levelName').textContent = levelData.name;
-        document.getElementById('enemyKilled').textContent = '0';
-        document.getElementById('enemyTotal').textContent = this.currentLevel.totalEnemies;
-        document.getElementById('objectiveFill').style.width = '0%';
-
-        // 显示 HUD
         document.getElementById('hud').classList.remove('hidden');
-        document.getElementById('loadingScreen').classList.add('hidden');
+        document.getElementById('bossBar').classList.add('hidden');
+        document.getElementById('touchControls').classList.toggle('hidden', !this.input.isTouch);
+        this._updateHUD();
+        this._showDialog(data.story, () => {
+            if (!this.input.isTouch) this.input.dom.requestPointerLock();
+        });
+    },
 
-        // 触屏控件
-        if (this.input.isTouch) {
-            document.getElementById('touchControls').classList.remove('hidden');
-        } else {
-            document.getElementById('touchControls').classList.add('hidden');
-        }
-
-        // 显示剧情
-        this.state = 'playing';
-        if (levelData.story) {
-            this._showDialog(levelData.story, () => {
-                // 对话框关闭后开始游戏
-                if (!this.input.isTouch) {
-                    // 桌面端：锁定鼠标实现视角控制
-                    this.input.dom.requestPointerLock();
-                }
-            });
-        } else {
-            if (!this.input.isTouch) {
-                this.input.dom.requestPointerLock();
-            }
-        }
-
-        this._updateWeaponSwitchUI();
-        document.getElementById('loadingFill').style.width = '100%';
+    _pickupText(letter) {
+        if (letter === 'R') return 'R · 子弹加速！';
+        if (letter === 'B') return 'B · 防护罩！';
+        if (letter === '+') return '+1 格血';
+        const w = WEAPON_DATA[letter];
+        return w ? (w.letter + ' · ' + w.name + '！') : '';
     },
 
     _showDialog(text, callback) {
@@ -252,27 +161,6 @@ const Game = {
         };
     },
 
-    onLevelComplete() {
-        if (this.levelIndex >= LEVELS_DATA.length - 1) {
-            // 通关
-            this.state = 'victory';
-            document.getElementById('hud').classList.add('hidden');
-            document.getElementById('touchControls').classList.add('hidden');
-            document.getElementById('finalScore').textContent = this.player.score;
-            document.getElementById('victoryScreen').classList.remove('hidden');
-            if (document.pointerLockElement) document.exitPointerLock();
-        } else {
-            // 下一关
-            this.levelIndex++;
-            const nextData = LEVELS_DATA[this.levelIndex];
-            this._showCenterMsg(nextData.name, 2000, () => {
-                this._showDialog(nextData.story || '', () => {
-                    this._loadLevel(this.levelIndex);
-                });
-            });
-        }
-    },
-
     _showCenterMsg(text, duration, callback) {
         const msg = document.getElementById('centerMsg');
         msg.textContent = text;
@@ -280,78 +168,122 @@ const Game = {
         msg.classList.add('show');
         setTimeout(() => {
             msg.classList.remove('show');
-            setTimeout(() => {
-                msg.classList.add('hidden');
-                if (callback) callback();
-            }, 500);
-        }, duration);
+            setTimeout(() => { msg.classList.add('hidden'); if (callback) callback(); }, 400);
+        }, duration || 1500);
+    },
+
+    _addScore(n) {
+        this.score += n;
+        while (this.score >= this._nextExtend) {
+            this._nextExtend += CONFIG.player.extendScore;
+            this.lives++;
+            this._showCenterMsg('延长！命 +1（×' + this.lives + '）', 1400);
+        }
+        this._updateHUD();
     },
 
     _onPlayerDeath() {
-        if (this.state !== 'playing') return; // 防止重复触发
-        this.state = 'gameover';
+        // 只有 Game 能决定生死流转；Player.takeDamage 只发回调
+        this.lives--;
         AudioManager.gameOver();
-        document.getElementById('finalScore').textContent = this.player.score;
-        document.getElementById('hud').classList.add('hidden');
-        document.getElementById('touchControls').classList.add('hidden');
-        document.getElementById('gameOverScreen').classList.remove('hidden');
-        if (document.pointerLockElement) document.exitPointerLock();
+        if (this.lives > 0) {
+            this.projectiles.clear();
+            this.player.respawn(this.checkpoint);
+            this._showCenterMsg('阵亡！剩余命 ×' + this.lives, 1600);
+            this._updateHUD();
+        } else {
+            this.state = 'gameover';
+            document.getElementById('gameOverText').textContent = '倒在了' + LEVELS_DATA[this.levelIndex].name + ' · 分数 ' + this.score;
+            document.getElementById('hud').classList.add('hidden');
+            document.getElementById('touchControls').classList.add('hidden');
+            document.getElementById('gameOverScreen').classList.remove('hidden');
+            if (document.pointerLockElement) document.exitPointerLock();
+        }
+    },
+
+    _onBossDefeated() {
+        if (this.state !== 'playing') return;
+        this.state = 'levelclear';
+        AudioManager.levelComplete();
+        document.getElementById('bossBar').classList.add('hidden');
+        this.projectiles.clear();
+        if (this.levelIndex >= LEVELS_DATA.length - 1) {
+            setTimeout(() => {
+                this.state = 'victory';
+                document.getElementById('finalScore').textContent = this.score;
+                document.getElementById('hud').classList.add('hidden');
+                document.getElementById('touchControls').classList.add('hidden');
+                document.getElementById('victoryScreen').classList.remove('hidden');
+                if (document.pointerLockElement) document.exitPointerLock();
+            }, 1400);
+        } else {
+            const nextName = LEVELS_DATA[this.levelIndex + 1].name;
+            this._showCenterMsg('关卡完成！下一关：' + nextName, 2000, () => {
+                this.levelIndex++;
+                this._loadLevel(this.levelIndex, false);
+            });
+        }
     },
 
     showMenu() {
         this.state = 'menu';
+        if (this.currentLevel) { this.currentLevel.destroy(); this.currentLevel = null; }
+        if (this.player) { this.player.destroy(); this.player = null; }
+        this.projectiles.clear();
         document.getElementById('hud').classList.add('hidden');
         document.getElementById('touchControls').classList.add('hidden');
         document.getElementById('gameOverScreen').classList.add('hidden');
         document.getElementById('victoryScreen').classList.add('hidden');
-        document.getElementById('loadingScreen').classList.add('hidden');
         document.getElementById('mainMenu').classList.remove('hidden');
-
-        // 清理场景
-        if (this.currentLevel) {
-            this.currentLevel.destroy();
-            this.currentLevel = null;
-        }
-        if (this.player) {
-            this.player.destroy();
-            this.player = null;
-        }
-
-        // 清理场景中所有非灯光物体
-        const toRemove = this.scene.children.filter(c => !c.isLight && !c.userData.isMenuParticle);
-        for (const obj of toRemove) this.scene.remove(obj);
-
         this.scene.background = new THREE.Color(0x0a0a15);
         this.scene.fog = null;
-
-        // 菜单背景：添加粒子效果
+        this.camera.position.set(0, 3, 38);
+        this.camera.lookAt(0, 2, 0);
         this._addMenuBackground();
     },
 
     _addMenuBackground() {
-        // 清除旧的
-        const oldParticles = this.scene.children.filter(c => c.userData.isMenuParticle);
-        for (const p of oldParticles) this.scene.remove(p);
-
-        // 添加星星
+        const old = this.scene.children.filter((c) => c.userData && c.userData.isMenuParticle);
+        for (const p of old) { this.scene.remove(p); Utils.disposeObject(p); }
         const starGeo = new THREE.BufferGeometry();
-        const starCount = 200;
-        const positions = new Float32Array(starCount * 3);
-        for (let i = 0; i < starCount * 3; i += 3) {
+        const count = 200;
+        const positions = new Float32Array(count * 3);
+        for (let i = 0; i < count * 3; i += 3) {
             positions[i] = (Math.random() - 0.5) * 200;
             positions[i + 1] = Math.random() * 100;
             positions[i + 2] = (Math.random() - 0.5) * 200;
         }
         starGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-        const starMat = new THREE.PointsMaterial({ color: 0xff6b35, size: 0.5, transparent: true, opacity: 0.6 });
-        const stars = new THREE.Points(starGeo, starMat);
+        const stars = new THREE.Points(starGeo, new THREE.PointsMaterial({ color: 0xff6b35, size: 0.5, transparent: true, opacity: 0.6 }));
         stars.userData.isMenuParticle = true;
         this.scene.add(stars);
     },
 
+    // ---------------- HUD ----------------
+    _updateHUD() {
+        if (!this.player || !this.currentLevel) return;
+        const p = this.player;
+        const hearts = document.getElementById('hearts');
+        if (hearts) hearts.textContent = '❤'.repeat(p.hpCells) + '🖤'.repeat(Math.max(0, CONFIG.player.maxCells - p.hpCells));
+        const livesEl = document.getElementById('livesValue');
+        if (livesEl) livesEl.textContent = '×' + Math.max(0, this.lives);
+        const w = WEAPON_DATA[p.weapon];
+        const weaponEl = document.getElementById('weaponName');
+        if (weaponEl) weaponEl.textContent = w.letter + ' · ' + w.name + (p.rapid ? ' +R' : '') + (p.barrier > 0 ? ' · 罩' + Math.ceil(p.barrier) + 's' : '');
+        const scoreEl = document.getElementById('scoreValue');
+        if (scoreEl) scoreEl.textContent = this.score;
+        const levelEl = document.getElementById('levelName');
+        if (levelEl) levelEl.textContent = this.currentLevel.data.name;
+        const dist = Utils.clamp(this.currentLevel.playerDist(p), 0, this.currentLevel.length);
+        const fill = document.getElementById('objectiveFill');
+        if (fill) fill.style.width = (dist / this.currentLevel.length * 100) + '%';
+        const prog = document.getElementById('progressText');
+        if (prog) prog.textContent = Math.floor(dist) + 'm / ' + this.currentLevel.length + 'm';
+        if (this.currentLevel.bossActive) {
+            const bf = document.getElementById('bossFill');
+            if (bf) bf.style.width = (this.currentLevel.bossFraction * 100) + '%';
+        }
+    },
 };
 
-// 启动游戏
-window.addEventListener('DOMContentLoaded', () => {
-    Game._init();
-});
+window.addEventListener('DOMContentLoaded', () => { Game._init(); });
