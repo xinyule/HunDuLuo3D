@@ -14,11 +14,23 @@
         <div class="menu-content">
             <h1 class="game-title">魂斗罗3D</h1>
             <p class="game-subtitle">CONTRA 3D — GTA式第三人称重制</p>
+            <div class="lives-select">
+                <span class="lives-label">命数</span>
+                <div class="lives-options" id="livesOptions">
+                    <button class="lives-btn active" data-lives="3">3</button>
+                    <button class="lives-btn" data-lives="5">5</button>
+                    <button class="lives-btn" data-lives="10">10</button>
+                    <button class="lives-btn" data-lives="30">30</button>
+                    <button class="lives-btn" data-lives="inf">∞</button>
+                </div>
+            </div>
             <div class="menu-buttons">
                 <button id="btnStart" class="menu-btn">开始游戏</button>
                 <button id="btnControls" class="menu-btn">操作说明</button>
             </div>
-            <p class="menu-hint">WASD移动 | 鼠标转镜头 | 左键射击 | 右键瞄准 | 空格跳跃 | C趴下 | Shift疾跑</p>
+            <p class="menu-hint" id="menuHi">最高分: 0</p>
+            <p class="menu-hint">WASD移动 | 鼠标转镜头 | 左键射击 | 右键瞄准 | 空格跳跃 | C趴下 | Shift疾跑 | M 音乐开关</p>
+            <p class="menu-hint">秘籍：↑↑↓↓←→←→ B A = 30 命 · 命尽可续关 3 次（本关重开）</p>
             <p class="menu-hint">打飞鹰徽章换枪（S散射/M机枪/F火球/L激光）· 3格血 · 3条命 · 敌弹可躲</p>
             <p class="menu-hint">手机: 左下摇杆移动 | 右下射击 | 跳/趴按钮 | 拖动屏幕转镜头</p>
         </div>
@@ -37,6 +49,8 @@
                 <div class="control-row"><span class="key">C / Ctrl</span><span>趴下（躲高弹道，贴地射击）</span></div>
                 <div class="control-row"><span class="key">Shift</span><span>疾跑</span></div>
                 <div class="control-row"><span class="key">飞鹰道具</span><span>打下飞过的鹰徽章：S散射 M机枪 F火球 L激光 R加速 B防护罩</span></div>
+                <div class="control-row"><span class="key">M</span><span>背景音乐开/关</span></div>
+                <div class="control-row"><span class="key">命数</span><span>主菜单可选 3/5/10/30/∞；↑↑↓↓←→←→BA 秘籍 30 命</span></div>
                 <div class="control-row"><span class="key">手机</span><span>摇杆移动 · 射击/跳/趴按钮 · 拖屏转镜头</span></div>
             </div>
             <button id="btnControlsClose" class="menu-btn">返回</button>
@@ -116,6 +130,7 @@
             <h1 class="game-title-red">任务失败</h1>
             <p class="game-subtitle" id="gameOverText">你已阵亡</p>
             <div class="menu-buttons">
+                <button id="btnContinue" class="menu-btn hidden">续关 (×3) — 本关重开</button>
                 <button id="btnRetry" class="menu-btn">重新开始</button>
                 <button id="btnMenu" class="menu-btn">返回菜单</button>
             </div>

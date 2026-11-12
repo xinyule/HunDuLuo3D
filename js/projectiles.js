@@ -8,6 +8,7 @@ class ProjectileSystem {
         this.scene = scene;
         this.list = [];
         this.effects = [];
+        this._gen = 0; // clear() 代际：回调链中途 clear 时，正在跑的 update 必须立即停手
         this._geoSphere = new THREE.SphereGeometry(1, 8, 6);
         this._geoDisc = new THREE.CylinderGeometry(0.5, 0.5, 0.12, 10);
         this._mats = {};
@@ -93,8 +94,10 @@ class ProjectileSystem {
     update(dt, ctx) {
         // ctx: { targets, colliders, player, onPlayerHit(damage) }
         const player = ctx.player;
+        const gen = this._gen;
         for (let i = this.list.length - 1; i >= 0; i--) {
             const p = this.list[i];
+            if (!p) continue;
             if (!p.alive) { this._removeAt(i); continue; }
             p.t += dt;
 
@@ -107,6 +110,7 @@ class ProjectileSystem {
                 if (pos.y <= 0.16 || this._hitsWorld(pos, ctx.colliders, p.radius)) {
                     this._explode(p, ctx);
                     p.alive = false;
+                    if (this._gen !== gen) return;
                 }
                 continue;
             }
@@ -135,6 +139,8 @@ class ProjectileSystem {
             if (p.travelled > p.maxRange) p.alive = false;
             if (p.kind === 'disc') p.mesh.rotation.y += dt * 12;
             if (!p.alive) this._removeAt(i);
+            // 子弹回调可能触发玩家阵亡/Boss 败北 -> Game 会 clear() 全部弹丸，立即停手防越界
+            if (this._gen !== gen) return;
         }
 
         // 爆炸特效
@@ -212,11 +218,13 @@ class ProjectileSystem {
 
     _removeAt(i) {
         const p = this.list[i];
+        if (!p) return;
         this.scene.remove(p.mesh);
         this.list.splice(i, 1);
     }
 
     clear() {
+        this._gen++;
         for (const p of this.list) this.scene.remove(p.mesh);
         this.list = [];
         for (const e of this.effects) { this.scene.remove(e.mesh); e.mesh.material.dispose(); }

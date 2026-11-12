@@ -7,6 +7,10 @@ const Game = {
     levelIndex: 0,
     score: 0,
     lives: CONFIG.player.startLives,
+    livesChoice: CONFIG.player.startLives, // 菜单可选：3 / 5 / 10 / 30 / 'inf'
+    continuesLeft: 3,
+    hiScore: 0,
+    _konamiBuf: [],
     _nextExtend: CONFIG.player.extendScore,
 
     scene: null, camera: null, renderer: null, clock: null,
@@ -29,9 +33,43 @@ const Game = {
         this.cameraRig = new ThirdPersonCamera(this.camera);
         this.projectiles = new ProjectileSystem(this.scene);
         window.addEventListener('resize', () => this._onResize());
+        try { this.hiScore = parseInt(localStorage.getItem('contra3d_hi') || '0', 10) || 0; } catch (e) { this.hiScore = 0; }
+        this._updateHiDisplay();
         this._bindUI();
         this._addMenuBackground();
         this._render();
+
+        // 科乐美秘籍：↑↑↓↓←→←→BA → 30 命（原作彩蛋）
+        const KONAMI = ['ArrowUp', 'ArrowUp', 'ArrowDown', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'ArrowLeft', 'ArrowRight', 'KeyB', 'KeyA'];
+        window.addEventListener('keydown', (e) => {
+            if (e.code === 'KeyM') {
+                const muted = AudioManager.toggleMute();
+                if (!muted && this.state === 'playing') AudioManager.startBGM();
+                return;
+            }
+            if (this.state !== 'menu') return;
+            this._konamiBuf.push(e.code);
+            if (this._konamiBuf.length > KONAMI.length) this._konamiBuf.shift();
+            if (KONAMI.every((k, i) => this._konamiBuf[i] === k)) {
+                this._konamiBuf = [];
+                this.setLivesChoice(30);
+                AudioManager.init(); AudioManager.pickup();
+                const hi = document.getElementById('menuHi');
+                if (hi) hi.textContent = '★ 秘籍生效：30 命！ ★　最高分: ' + this.hiScore;
+            }
+        });
+    },
+
+    _updateHiDisplay() {
+        const hi = document.getElementById('menuHi');
+        if (hi) hi.textContent = '最高分: ' + this.hiScore;
+    },
+
+    setLivesChoice(v) {
+        this.livesChoice = v;
+        document.querySelectorAll('.lives-btn').forEach((b) => {
+            b.classList.toggle('active', String(v) === b.dataset.lives);
+        });
     },
 
     _bindUI() {
@@ -40,7 +78,15 @@ const Game = {
         on('btnControls', () => document.getElementById('controlsPanel').classList.remove('hidden'));
         on('btnControlsClose', () => document.getElementById('controlsPanel').classList.add('hidden'));
         on('btnRetry', () => this.startGame());
+        on('btnContinue', () => this._continueGame());
         on('btnMenu', () => this.showMenu());
+        document.querySelectorAll('.lives-btn').forEach((b) => {
+            b.addEventListener('click', () => {
+                const v = b.dataset.lives;
+                this.setLivesChoice(v === 'inf' ? 'inf' : parseInt(v, 10));
+                AudioManager.init();
+            });
+        });
         on('btnVictoryRetry', () => this.startGame());
         on('btnVictoryMenu', () => this.showMenu());
         on('dialog', () => { if (this._dialogCallback) this._dialogCallback(); });
@@ -88,10 +134,12 @@ const Game = {
     // ---------------- 流程 ----------------
     startGame() {
         this.score = 0;
-        this.lives = CONFIG.player.startLives;
+        this.lives = this.livesChoice === 'inf' ? Infinity : this.livesChoice;
+        this.continuesLeft = 3;
         this._nextExtend = CONFIG.player.extendScore;
         this.levelIndex = 0;
         AudioManager.init();
+        AudioManager.startBGM();
         document.getElementById('mainMenu').classList.add('hidden');
         document.getElementById('gameOverScreen').classList.add('hidden');
         document.getElementById('victoryScreen').classList.add('hidden');
@@ -182,23 +230,50 @@ const Game = {
         this._updateHUD();
     },
 
+    _saveHi() {
+        if (this.score > this.hiScore) {
+            this.hiScore = this.score;
+            try { localStorage.setItem('contra3d_hi', String(this.hiScore)); } catch (e) { /* 存档不可用时忽略 */ }
+        }
+        this._updateHiDisplay();
+    },
+
     _onPlayerDeath() {
         // 只有 Game 能决定生死流转；Player.takeDamage 只发回调
-        this.lives--;
-        AudioManager.gameOver();
+        if (this.lives !== Infinity) this.lives--;
         if (this.lives > 0) {
+            AudioManager.hurt();
             this.projectiles.clear();
             this.player.respawn(this.checkpoint);
-            this._showCenterMsg('阵亡！剩余命 ×' + this.lives, 1600);
+            this._showCenterMsg('阵亡！剩余命 ×' + (this.lives === Infinity ? '∞' : this.lives), 1600);
             this._updateHUD();
         } else {
             this.state = 'gameover';
+            AudioManager.stopBGM();
+            AudioManager.gameOver();
+            this._saveHi();
             document.getElementById('gameOverText').textContent = '倒在了' + LEVELS_DATA[this.levelIndex].name + ' · 分数 ' + this.score;
+            const btnC = document.getElementById('btnContinue');
+            if (btnC) {
+                btnC.classList.toggle('hidden', this.continuesLeft <= 0);
+                btnC.textContent = '续关 (×' + this.continuesLeft + ') — 本关重开';
+            }
             document.getElementById('hud').classList.add('hidden');
             document.getElementById('touchControls').classList.add('hidden');
             document.getElementById('gameOverScreen').classList.remove('hidden');
             if (document.pointerLockElement) document.exitPointerLock();
         }
+    },
+
+    _continueGame() {
+        if (this.continuesLeft <= 0 || this.state !== 'gameover') return;
+        this.continuesLeft--;
+        this.lives = this.livesChoice === 'inf' ? Infinity : this.livesChoice;
+        document.getElementById('gameOverScreen').classList.add('hidden');
+        AudioManager.init();
+        AudioManager.startBGM();
+        // 续关：本关从头重开，分数保留，武器重置
+        this._loadLevel(this.levelIndex, true);
     },
 
     _onBossDefeated() {
@@ -210,6 +285,8 @@ const Game = {
         if (this.levelIndex >= LEVELS_DATA.length - 1) {
             setTimeout(() => {
                 this.state = 'victory';
+                AudioManager.stopBGM();
+                this._saveHi();
                 document.getElementById('finalScore').textContent = this.score;
                 document.getElementById('hud').classList.add('hidden');
                 document.getElementById('touchControls').classList.add('hidden');
@@ -217,8 +294,9 @@ const Game = {
                 if (document.pointerLockElement) document.exitPointerLock();
             }, 1400);
         } else {
+            this._addScore(1000); // 过关奖励分
             const nextName = LEVELS_DATA[this.levelIndex + 1].name;
-            this._showCenterMsg('关卡完成！下一关：' + nextName, 2000, () => {
+            this._showCenterMsg('关卡完成！奖励 1000 分 · 下一关：' + nextName, 2000, () => {
                 this.levelIndex++;
                 this._loadLevel(this.levelIndex, false);
             });
@@ -227,6 +305,7 @@ const Game = {
 
     showMenu() {
         this.state = 'menu';
+        AudioManager.stopBGM();
         if (this.currentLevel) { this.currentLevel.destroy(); this.currentLevel = null; }
         if (this.player) { this.player.destroy(); this.player = null; }
         this.projectiles.clear();
@@ -266,7 +345,7 @@ const Game = {
         const hearts = document.getElementById('hearts');
         if (hearts) hearts.textContent = '❤'.repeat(p.hpCells) + '🖤'.repeat(Math.max(0, CONFIG.player.maxCells - p.hpCells));
         const livesEl = document.getElementById('livesValue');
-        if (livesEl) livesEl.textContent = '×' + Math.max(0, this.lives);
+        if (livesEl) livesEl.textContent = this.lives === Infinity ? '×∞' : '×' + Math.max(0, this.lives);
         const w = WEAPON_DATA[p.weapon];
         const weaponEl = document.getElementById('weaponName');
         if (weaponEl) weaponEl.textContent = w.letter + ' · ' + w.name + (p.rapid ? ' +R' : '') + (p.barrier > 0 ? ' · 罩' + Math.ceil(p.barrier) + 's' : '');

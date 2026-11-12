@@ -35,14 +35,49 @@ const Utils = {
 const AudioManager = {
     ctx: null,
     enabled: true,
+    muted: false,
     init() {
         if (this.ctx) { if (this.ctx.state === 'suspended') this.ctx.resume(); return; }
         try {
             this.ctx = new (window.AudioContext || window.webkitAudioContext)();
         } catch (e) { this.enabled = false; }
     },
+    toggleMute() {
+        this.muted = !this.muted;
+        if (this.muted) this.stopBGM();
+        return this.muted;
+    },
+    // 程序化 BGM：方波低音 + 主音琶音的通用 8-bit 风格循环（非原作旋律复刻）
+    bgm: { timer: null, step: 0, playing: false },
+    startBGM() {
+        if (!this.enabled || !this.ctx || this.muted || this.bgm.playing) return;
+        this.bgm.playing = true;
+        this.bgm.step = 0;
+        const stepMs = (60 / 142 / 2) * 1000; // 142 BPM 八分音符
+        this.bgm.timer = setInterval(() => this._bgmStep(), stepMs);
+    },
+    stopBGM() {
+        if (this.bgm.timer) clearInterval(this.bgm.timer);
+        this.bgm.timer = null;
+        this.bgm.playing = false;
+    },
+    _bgmStep() {
+        if (!this.ctx || this.muted) return;
+        const s = this.bgm.step % 64; // 4 小节 × 16 步
+        const bar = Math.floor(s / 16), st = s % 16;
+        const roots = [110, 87.31, 130.81, 98]; // A2 F2 C3 G2
+        if ([0, 3, 6, 8, 11, 14].includes(st)) {
+            this._tone(roots[bar], 0.16, 'triangle', 0.075);
+            this._tone(roots[bar] * 2, 0.1, 'square', 0.02);
+        }
+        const scale = [440, 523.25, 587.33, 659.25, 783.99, 880];
+        const riff = [0, -1, 2, -1, 4, -1, 3, -1, 2, -1, 1, -1, 3, -1, 5, -1];
+        if (riff[st] >= 0 && bar % 2 === 0) this._tone(scale[riff[st]], 0.11, 'square', 0.032);
+        if (st % 4 === 2) this._tone(5200, 0.03, 'square', 0.01);
+        this.bgm.step++;
+    },
     _tone(freq, dur, type, vol, slideTo, delay) {
-        if (!this.enabled || !this.ctx) return;
+        if (!this.enabled || !this.ctx || this.muted) return;
         const t0 = this.ctx.currentTime + (delay || 0);
         const osc = this.ctx.createOscillator();
         const gain = this.ctx.createGain();

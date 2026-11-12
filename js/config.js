@@ -53,6 +53,7 @@ const ENEMY_DATA = {
     runner:    { hp: 45,  speed: 6.4, radius: 0.5,  score: 150, meleeRange: 1.7, meleeCooldown: 0.9 },
     sniper:    { hp: 45,  speed: 0,   radius: 0.5,  score: 300, fireInterval: 2.4, orbSpeed: 27, range: 60 },
     mortar:    { hp: 80,  speed: 0,   radius: 0.55, score: 250, fireInterval: 3.1, range: 52 },
+    statue:    { hp: 110, speed: 0,   radius: 0.8,  score: 250, fireInterval: 3.0, range: 50 },
     turret:    { hp: 120, speed: 0,   radius: 0.85, score: 200, fireInterval: 0.42, burst: 3, burstPause: 1.5, orbSpeed: 18, range: 44 },
     roller:    { hp: 30,  speed: 7.5, radius: 0.45, score: 100, explodeRange: 1.9 },
     spore:     { hp: 35,  speed: 5.4, radius: 0.42, score: 150, meleeRange: 1.5, meleeCooldown: 0.8 },
@@ -111,7 +112,7 @@ const LEVELS_DATA = [
         spawns: [
             [26, 'rifleman', -5], [40, 'sniper', 6], [54, 'runner', 3], [66, 'rifleman', -6],
             [80, 'turret', 6], [92, 'sniper', -7], [104, 'runner', -2], [104, 'runner', 4],
-            [118, 'mortar', -6], [130, 'rifleman', 5], [142, 'turret', -6], [154, 'sniper', 6],
+            [118, 'statue', -6], [130, 'rifleman', 5], [142, 'statue', 6], [154, 'sniper', 6],
             [162, 'runner', 0], [170, 'rifleman', -4],
         ],
         falcons: [60, 125], letters: ['F', 'S'],
@@ -165,6 +166,7 @@ const LEVELS_DATA = [
         env: { bg: 0x12120e, ground: 0x44423a, side: 0x302e28, fog: 0x12120e, fogDensity: 0.013, sun: 0xffe9b0 },
         width: 24, length: 205,
         carts: [70, 112, 150],
+        crushers: [88, 132, 172],
         spawns: [
             [24, 'turret', -7], [34, 'rifleman', 5], [44, 'runner', -3], [54, 'turret', 7],
             [82, 'rifleman', -6], [90, 'mortar', 6], [98, 'runner', 0],

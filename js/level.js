@@ -52,7 +52,11 @@ class Level {
         this.gates = [];
         this.flames = [];
         this.carts = [];
+        this.crushers = [];
         this.rocks = [];
+        this.snow = null;
+        this.bridgeCollapsed = false;
+        this._bridgeMesh = null;
         this.boss = null;
         this.bossActivated = false;
         this.time = 0;
@@ -119,6 +123,7 @@ class Level {
         if (this.data.gates) this.data.gates.forEach((gd) => this._buildGate(gd));
         if (this.data.flames) this.data.flames.forEach((fd, i) => this._buildFlame(fd, i));
         if (this.data.carts) this.data.carts.forEach((cd, i) => this._buildCart(cd, i));
+        if (this.data.crushers) this.data.crushers.forEach((cd, i) => this._buildCrusher(cd, i));
 
         // Boss（竞技段尽头）
         const bossZ = -this.length + 10;
@@ -203,7 +208,9 @@ class Level {
         const riverZ = 26 - 70;
         const river = this._mesh(new THREE.PlaneGeometry(W + 30, 11), 0x1d4e6b, 0, 0.01, riverZ, { mat: { transparent: true, opacity: 0.9 } });
         river.rotation.x = -Math.PI / 2;
-        this._box(0, riverZ, 5.5, 12.5, 0.35, 0x7a5c33);
+        // 木桥：玩家过桥后会坍塌（原作第1关标志桥段）
+        this._bridgeMesh = this._box(0, riverZ, 5.5, 12.5, 0.35, 0x7a5c33, { list: 'objects' });
+        this._bridgeZ = riverZ;
     }
 
     _themeBase() {
@@ -275,6 +282,25 @@ class Level {
             this._addCollider({ type: 'circle', x, z, r: 1.5, h: 1.1 });
         });
         this._scatterCover(rand, 6, (x, z) => this._box(x, z, 1.15, 1.15, 1.15, 0x7a6a4a));
+        this._buildSnowfall();
+    }
+
+    _buildSnowfall() {
+        const count = 320;
+        const geo = new THREE.BufferGeometry();
+        const positions = new Float32Array(count * 3);
+        for (let i = 0; i < count; i++) {
+            positions[i * 3] = Utils.randomRange(-this.width / 2 - 6, this.width / 2 + 6);
+            positions[i * 3 + 1] = Utils.randomRange(0, 15);
+            positions[i * 3 + 2] = Utils.randomRange(-this.length, 30);
+        }
+        geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        const points = new THREE.Points(geo, new THREE.PointsMaterial({
+            color: 0xffffff, size: 0.16, transparent: true, opacity: 0.85, depthWrite: false,
+        }));
+        this.scene.add(points);
+        this.objects.push(points);
+        this.snow = { points, positions, count };
     }
 
     _themeEnergy() {
@@ -399,6 +425,34 @@ class Level {
         this.scene.add(g); this.objects.push(g);
         const collider = this._addCollider({ type: 'box', x: 0, z, w: 3.4, d: 2, h: 1.7, y0: 0 });
         this.carts.push({ group: g, collider, z, phase: i * 2.1, speed: 0.55 + i * 0.12, hitCooldown: 0 });
+    }
+
+    _buildCrusher(dist, i) {
+        // 仓库压顶机：悬停→预警抖动→砸落→停留→升起，周期循环
+        const z = 26 - dist;
+        const g = new THREE.Group();
+        const steel = new THREE.MeshLambertMaterial({ color: 0x7a4a2a });
+        const dark = new THREE.MeshLambertMaterial({ color: 0x3a3630 });
+        [-2.9, 2.9].forEach((px) => {
+            const pillar = new THREE.Mesh(new THREE.BoxGeometry(0.6, 6.4, 0.6), dark);
+            pillar.position.set(px, 3.2, 0); g.add(pillar);
+        });
+        const beam = new THREE.Mesh(new THREE.BoxGeometry(6.4, 0.7, 3.2), dark);
+        beam.position.y = 6.4; g.add(beam);
+        const press = new THREE.Group();
+        const block = new THREE.Mesh(new THREE.BoxGeometry(5.2, 1.15, 3), steel);
+        press.add(block);
+        for (let k = -2; k <= 2; k++) {
+            const tooth = new THREE.Mesh(new THREE.ConeGeometry(0.18, 0.5, 4), dark);
+            tooth.rotation.x = Math.PI;
+            tooth.position.set(k * 1.1, -0.8, 0);
+            press.add(tooth);
+        }
+        press.position.y = 5.6;
+        g.add(press);
+        g.position.set(0, 0, z);
+        this.scene.add(g); this.objects.push(g);
+        this.crushers.push({ group: g, press, z, period: 4.4, phase: i * 1.5, state: 'up', groundY: 0 });
     }
 
     // ---------------- 生成 ----------------
@@ -547,6 +601,55 @@ class Level {
                 this.scene.remove(r.mesh); Utils.disposeObject(r.mesh);
                 this.rocks.splice(i, 1);
             }
+        }
+
+        // 丛林断桥：玩家过桥后坍塌
+        if (this._bridgeMesh && !this.bridgeCollapsed && player.position.z < this._bridgeZ - 8) {
+            this.bridgeCollapsed = true;
+            this.ctx.projectiles.spawnExplosionFX(new THREE.Vector3(0, 0.6, this._bridgeZ), 2.4, 0x6ab0ff);
+        }
+        if (this._bridgeMesh && this.bridgeCollapsed && this._bridgeMesh.position.y > -1.6) {
+            this._bridgeMesh.position.y -= dt * 1.8;
+            this._bridgeMesh.rotation.x += dt * 0.25;
+        }
+
+        // 仓库压顶机周期
+        for (const c of this.crushers) {
+            const t = (this.time + c.phase) % c.period;
+            let y;
+            if (t < 1.7) { y = 5.6; c.state = 'up'; }
+            else if (t < 2.1) { y = 5.6 + Math.sin(this.time * 40) * 0.05; c.state = 'warn'; }
+            else if (t < 2.32) {
+                y = 5.6 - (t - 2.1) / 0.22 * 4.45;
+                if (c.state !== 'slam' && t > 2.26) {
+                    c.state = 'slam';
+                    if (player.alive) {
+                        const dx = player.position.x, dz = player.position.z - c.z;
+                        if (Math.abs(dx) < 2.9 && Math.abs(dz) < 1.9 && player.position.y < c.groundY + 1.3) {
+                            player.takeDamage(1);
+                        }
+                    }
+                    this.ctx.projectiles.spawnExplosionFX(new THREE.Vector3(0, c.groundY + 0.3, c.z), 1.6, 0xcc9966);
+                }
+            }
+            else if (t < 3.0) { y = 1.15; c.state = 'hold'; }
+            else { y = 1.15 + (t - 3.0) / (c.period - 3.0) * 4.45; c.state = 'rise'; }
+            c.press.position.y = y;
+        }
+
+        // 雪原降雪
+        if (this.snow) {
+            const pos = this.snow.positions;
+            for (let i = 0; i < this.snow.count; i++) {
+                pos[i * 3 + 1] -= dt * 2.3;
+                pos[i * 3] += Math.sin(this.time * 1.3 + i) * dt * 0.5;
+                if (pos[i * 3 + 1] < 0) {
+                    pos[i * 3 + 1] = 14;
+                    pos[i * 3 + 2] = player.position.z + Utils.randomRange(-70, 15);
+                    pos[i * 3] = player.position.x + Utils.randomRange(-this.width / 2 - 4, this.width / 2 + 4);
+                }
+            }
+            this.snow.points.geometry.attributes.position.needsUpdate = true;
         }
 
         this.pickups.update(dt, player, this);

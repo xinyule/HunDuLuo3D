@@ -26,6 +26,7 @@ class Enemy {
         this.hitX = x; this.hitY = y + 1; this.hitZ = z; this.hitR = d.radius + 0.3;
         if (type === 'tank') { this.hitY = y + 1.7; this.hitR = 2.1; }
         if (type === 'turret') { this.hitY = y + 0.9; this.hitR = 1.0; }
+        if (type === 'statue') { this.hitY = y + 1.6; this.hitR = 1.05; }
 
         this.mesh = this._buildMesh();
         this.mesh.position.set(x, y, z);
@@ -110,6 +111,22 @@ class Enemy {
                 leg.rotation.z = Math.cos(a) * 0.5; leg.rotation.x = -Math.sin(a) * 0.5;
                 g.add(leg);
             }
+        } else if (this.type === 'statue') {
+            // 瀑布喷火石像：石座 + 龙首，口中发光
+            box(1.5, 0.8, 1.5, M(0x5c5548), 0, 0.4, 0);
+            box(1.1, 1.0, 1.1, M(0x6a6255), 0, 1.3, 0);
+            const headG = new THREE.Group(); headG.position.set(0, 2.15, 0); g.add(headG);
+            const skull = new THREE.Mesh(new THREE.BoxGeometry(0.85, 0.7, 1.05), M(0x756a55));
+            headG.add(skull);
+            [-0.28, 0.28].forEach((hx) => {
+                const horn = new THREE.Mesh(new THREE.ConeGeometry(0.11, 0.45, 5), M(0x9a8a6a));
+                horn.position.set(hx, 0.5, -0.1); headG.add(horn);
+                const eye = new THREE.Mesh(new THREE.SphereGeometry(0.08, 6, 6), new THREE.MeshBasicMaterial({ color: 0xffcc33 }));
+                eye.position.set(hx, 0.1, 0.5); headG.add(eye);
+            });
+            const mouth = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.2, 0.1), new THREE.MeshBasicMaterial({ color: 0xff5510 }));
+            mouth.position.set(0, -0.18, 0.53); headG.add(mouth);
+            this.headGroup = headG;
         } else if (this.type === 'tank') {
             const hull = box(3.6, 1.1, 2.4, M(0x5a4a6a), 0, 0.95, 0);
             hull.name = 'hull';
@@ -234,6 +251,23 @@ class Enemy {
                 }
                 break;
             }
+            case 'statue': {
+                // 石像喷火球（抛物线火球，落地爆炸）
+                this.fireTimer -= dt;
+                if (this.fireTimer <= 0 && dist < d.range && player.alive) {
+                    this.fireTimer = d.fireInterval * Utils.randomRange(0.9, 1.2);
+                    const from = new THREE.Vector3(this.position.x, this.position.y + 2.1, this.position.z + 0.6);
+                    const T = 1.25, G = 16;
+                    const vel = new THREE.Vector3(
+                        (player.position.x - from.x) / T,
+                        ((player.position.y + 0.3 - from.y) + 0.5 * G * T * T) / T,
+                        (player.position.z - from.z) / T
+                    );
+                    this.ctx.projectiles.spawnGrenade(from, vel, false);
+                    AudioManager.enemyShoot();
+                }
+                break;
+            }
             case 'turret': {
                 if (this.headGroup) this.headGroup.rotation.y = this.facing - this.mesh.rotation.y;
                 if (dist < d.range && player.alive) {
@@ -304,7 +338,7 @@ class Enemy {
         this.mesh.rotation.y = (this.type === 'turret' || this.type === 'tank') ? 0 : this.facing;
         if (this.type === 'spore') this.mesh.position.y = this.position.y + Math.abs(Math.sin(this.t * 9)) * 0.22;
         this.hitX = this.position.x; this.hitZ = this.position.z;
-        this.hitY = this.position.y + (this.type === 'tank' ? 1.7 : this.type === 'turret' ? 0.95 : 1.0);
+        this.hitY = this.position.y + (this.type === 'tank' ? 1.7 : this.type === 'turret' ? 0.95 : this.type === 'statue' ? 1.6 : 1.0);
 
         // 血条
         if (this.hpBar) {
@@ -314,7 +348,7 @@ class Enemy {
                 const pct = Math.max(0, this.hp / this.maxHp);
                 this.hpFill.scale.x = pct;
                 this.hpFill.position.x = -(1 - pct) * this.hpW / 2;
-                this.hpBar.position.set(this.position.x, this.position.y + (this.type === 'tank' ? 3.1 : 2.15), this.position.z);
+                this.hpBar.position.set(this.position.x, this.position.y + (this.type === 'tank' ? 3.1 : this.type === 'statue' ? 3.0 : 2.15), this.position.z);
                 this.hpBar.lookAt(cameraPos);
             }
         }
