@@ -130,6 +130,16 @@ func _add_box(x: float, z: float, w: float, d: float, h: float, mat: Material, y
 		_add_collider({"type": "box", "x": x, "z": z, "w": w, "d": d, "h": h, "y0": y0})
 	return mi
 
+## 木质掩体（木箱）：碰撞带 wood 标签 + 血量——玩家子弹可穿透（伤害减半），
+## 且能被打烂，打烂后碰撞失效、箱子消失；敌方光弹会被它挡住
+func _add_crate(x: float, z: float, w: float, d: float, h: float, mat: Material) -> MeshInstance3D:
+	var mi := Util.box(self, Vector3(w, h, d), mat, Vector3(x, h / 2.0, z))
+	var c := _add_collider({"type": "box", "x": x, "z": z, "w": w, "d": d, "h": h, "y0": 0.0})
+	c["mat"] = "wood"
+	c["hp"] = 40.0
+	c["node"] = mi
+	return mi
+
 func _build() -> void:
 	var env_data: Dictionary = data["env"]
 	_setup_environment(env_data)
@@ -230,7 +240,6 @@ var _leaf_mat_snow: Material = null
 var _leaf_card_mesh: PlaneMesh = null
 
 static var _fern_scene: PackedScene = null
-static var _rock_scene: PackedScene = null
 static var _quiver_scene: PackedScene = null
 
 func _leaf_material(snow: bool) -> Material:
@@ -351,16 +360,21 @@ func _add_motes(count: int, tint: Color) -> void:
 	p.visibility_aabb = AABB(Vector3(-40, -6, -length - 20), Vector3(80, 16, length + 40))
 	add_child(p)
 
-func _rock_glb(x: float, z: float, rand: RandomNumberGenerator) -> void:
-	if _rock_scene == null:
-		_rock_scene = load("res://assets/veg/rock_face_01.glb")
-	var r := _rock_scene.instantiate() as Node3D
-	var sc := rand.randf_range(0.8, 1.7)
-	r.position = Vector3(x, get_support_y(x, z, 999.0) - 0.25, z)
-	r.rotation.y = rand.randf() * TAU
-	r.scale = Vector3.ONE * sc
-	add_child(r)
-	_add_collider({"type": "circle", "x": x, "z": z, "r": 1.0 * sc, "h": 1.2 * sc, "y0": 0.0})
+## 实体岩体簇：2-3 块带体积的岩石贴图球岩叠放，每块各配与视觉对齐的碰撞。
+## （退役原 rock_face_01 崖壁扫描面片：单面无厚度、放大后像纸片，且碰撞只在基座，
+##   用户实测「山不是 3D 的、子弹穿山」——2026-11-12 三修）
+func _boulder(x: float, z: float, rand: RandomNumberGenerator) -> void:
+	var base_y := get_support_y(x, z, 999.0)
+	var n := rand.randi_range(2, 3)
+	var main_s := rand.randf_range(1.3, 2.1)
+	for i in n:
+		var s := main_s * (1.0 if i == 0 else rand.randf_range(0.45, 0.65))
+		var ox := 0.0 if i == 0 else rand.randf_range(-1.0, 1.0) * main_s * 0.7
+		var oz := 0.0 if i == 0 else rand.randf_range(-1.0, 1.0) * main_s * 0.7
+		var rock := Util.sph(self, s, Util.pbr(Color(0.9, 0.87, 0.8), "rock", 0.95, 0.0, Vector2(2, 2)), Vector3(x + ox, base_y + s * 0.32, z + oz), 10, 8)
+		rock.scale = Vector3(rand.randf_range(1.0, 1.35), rand.randf_range(0.6, 0.85), rand.randf_range(0.9, 1.2))
+		rock.rotation.y = rand.randf() * TAU
+		_add_collider({"type": "circle", "x": x + ox, "z": z + oz, "r": s * 1.0, "h": s * 1.15, "y0": base_y})
 
 func _quiver(x: float, z: float, rand: RandomNumberGenerator) -> void:
 	if _quiver_scene == null:
@@ -386,10 +400,10 @@ func _theme_jungle() -> void:
 			if rand.randf() > 0.25:
 				_tree(s * (width / 2.0 + 2.4 + rand.randf() * 3.0), 26.0 - d, rand, false)
 		d += 7.0
-	_scatter(rand, 12, func(x, z, r): _add_box(x, z, 1.1, 1.1, 1.1, Util.pbr(Color(1, 1, 1), "planks", 0.9, 0.0, Vector2.ONE)))
+	_scatter(rand, 12, func(x, z, r): _add_crate(x, z, 1.1, 1.1, 1.1, Util.pbr(Color(1, 1, 1), "planks", 0.9, 0.0, Vector2.ONE)))
 	_scatter(rand, 8, func(x, z, r): _rock(x, z, r))
 	_scatter(rand, 14, func(x, z, r): _fern(x, z, r))
-	_scatter(rand, 5, func(x, z, r): _rock_glb(x, z, r))
+	_scatter(rand, 5, func(x, z, r): _boulder(x, z, r))
 	_scatter(rand, 16, func(x, z, r): _grass(x, z, r))
 	_add_motes(42, Color(1, 0.95, 0.8, 0.8))
 	# 河 + 爆裂木桥（原作第1关标志）
@@ -483,7 +497,7 @@ func _theme_waterfall() -> void:
 	pool.position = Vector3(0, terrace_top_y + 0.03, -length + 12.0)
 	pool.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(pool)
-	_scatter(rand, 8, func(x, z, r): _add_box(x, z, 1.1, 1.1, 1.0, Util.pbr(Color(1, 1, 1), "planks", 0.9)))
+	_scatter(rand, 8, func(x, z, r): _add_crate(x, z, 1.1, 1.1, 1.0, Util.pbr(Color(1, 1, 1), "planks", 0.9)))
 	_scatter(rand, 10, func(x, z, r): _grass(x, z, r))
 	_add_motes(30, Color(0.85, 0.95, 1, 0.7))
 
@@ -504,7 +518,7 @@ func _make_snowbank(x: float, z: float, _r: RandomNumberGenerator) -> void:
 	_add_collider({"type": "circle", "x": x, "z": z, "r": 1.5, "h": 1.1, "y0": 0.0})
 
 func _snow_extras(rand: RandomNumberGenerator) -> void:
-	_scatter(rand, 6, func(x, z, r): _add_box(x, z, 1.15, 1.15, 1.15, Util.pbr(Color(1, 1, 1), "planks", 0.9)))
+	_scatter(rand, 6, func(x, z, r): _add_crate(x, z, 1.15, 1.15, 1.15, Util.pbr(Color(1, 1, 1), "planks", 0.9)))
 	# 吹雪（日版独有动态）
 	_snow = GPUParticles3D.new()
 	_snow.amount = 420
@@ -550,7 +564,7 @@ func _theme_energy() -> void:
 	while d < length:
 		_quiver((1.0 if int(d) % 52 < 26 else -1.0) * (width / 2.0 + 4.5), 26.0 - d, rand)
 		d += 26.0
-	_scatter(rand, 5, func(x, z, r): _rock_glb(x, z, r))
+	_scatter(rand, 5, func(x, z, r): _boulder(x, z, r))
 
 func _theme_hangar() -> void:
 	var rand := Util.seeded(6606)
@@ -566,7 +580,7 @@ func _theme_hangar() -> void:
 			_add_box(s * (width / 2.0 + 2.4), 26.0 - d - 4.0, 3.4, 7.5, 3.1, cont_mats[ci % cont_mats.size()], 0.0, false)
 			ci += 1
 		d += 16.0
-	_scatter(rand, 10, func(x, z, r): _add_box(x, z, 1.25, 1.25, 1.25, Util.pbr(Color(1, 1, 1), "planks", 0.9)))
+	_scatter(rand, 10, func(x, z, r): _add_crate(x, z, 1.25, 1.25, 1.25, Util.pbr(Color(1, 1, 1), "planks", 0.9)))
 	for cd in data.get("carts", []):
 		var rail := MeshInstance3D.new()
 		var rp := PlaneMesh.new()

@@ -49,7 +49,7 @@ func spawn_player_bullet(from: Vector3, dir: Vector3, w: Dictionary) -> void:
 		"mesh": mesh, "pos": from, "dir": dir,
 		"speed": float(w["bullet_speed"]), "damage": int(w["damage"]),
 		"pierce": bool(w["pierce"]), "wave": bool(w.get("wave", false)),
-		"life": 2.2, "gen": _gen,
+		"life": 2.2, "gen": _gen, "pen": [],
 	})
 
 func spawn_orb(from: Vector3, dir: Vector3, speed: float, damage: int = 1) -> void:
@@ -121,7 +121,9 @@ func _seg_sphere(a: Vector3, b: Vector3, c: Vector3, r: float) -> bool:
 	var p := a + ab * t
 	return p.distance_squared_to(c) <= r * r
 
-func _point_in_colliders(p: Vector3, colliders: Array) -> bool:
+## 返回点所在的第一个有效碰撞体（无则空字典）。碰撞体可带 mat 标签：
+## hard（默认，岩石/金属/混凝土/树干）全挡；wood（木箱/木板）玩家子弹可穿透
+func _collider_at(p: Vector3, colliders: Array) -> Dictionary:
 	for c in colliders:
 		if c.get("disabled", false) or c.get("no_collide", false):
 			continue
@@ -130,14 +132,41 @@ func _point_in_colliders(p: Vector3, colliders: Array) -> bool:
 			continue
 		if c["type"] == "box":
 			if absf(p.x - float(c["x"])) <= float(c["w"]) / 2.0 and absf(p.z - float(c["z"])) <= float(c["d"]) / 2.0:
-				return true
+				return c
 		elif c["type"] == "circle":
 			var dx := p.x - float(c["x"])
 			var dz := p.z - float(c["z"])
 			var r := float(c["r"])
 			if dx * dx + dz * dz <= r * r:
-				return true
-	return false
+				return c
+	return {}
+
+## 子弹命中掩体的小火花（复用 _fx 衰减链，无声无光源，开销极低）
+func spawn_impact_fx(pos: Vector3, color: Color) -> void:
+	var mesh := MeshInstance3D.new()
+	var sm := SphereMesh.new()
+	sm.radius = 1.0
+	sm.height = 2.0
+	sm.radial_segments = 8
+	sm.rings = 5
+	mesh.mesh = sm
+	mesh.material_override = Util.glow(color, 2.6, 0.7)
+	mesh.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	add_child(mesh)
+	mesh.global_position = pos
+	_fx.append({"mesh": mesh, "t": 0.0, "dur": 0.13, "radius": 0.34})
+
+## 木质掩体承伤：打烂后碰撞失效、网格移除（掩体是真能打坏的）
+func _damage_wood(c: Dictionary, dmg: int) -> void:
+	if not c.has("hp"):
+		return
+	c["hp"] = float(c["hp"]) - float(dmg)
+	if float(c["hp"]) <= 0.0 and not bool(c.get("disabled", false)):
+		c["disabled"] = true
+		var node = c.get("node")
+		if node != null and is_instance_valid(node):
+			spawn_impact_fx((node as Node3D).global_position, Color(0.8, 0.6, 0.35))
+			(node as Node).queue_free()
 
 func update_projectiles(dt: float, args: Dictionary) -> void:
 	var targets: Array = args["targets"]
@@ -167,8 +196,24 @@ func update_projectiles(dt: float, args: Dictionary) -> void:
 					if not bool(b["pierce"]):
 						dead = true
 					break
-		if not dead and _point_in_colliders(np, colliders):
-			dead = true
+		if not dead:
+			# 中点+终点双采样，防高速子弹一步跨过薄掩体
+			var hit_c := _collider_at((prev + np) * 0.5, colliders)
+			var hit_p := (prev + np) * 0.5
+			if hit_c.is_empty():
+				hit_c = _collider_at(np, colliders)
+				hit_p = np
+			if not hit_c.is_empty():
+				if String(hit_c.get("mat", "hard")) == "wood":
+					if not (b["pen"] as Array).has(hit_c):
+						(b["pen"] as Array).append(hit_c)
+						var dmg_now := int(b["damage"])
+						_damage_wood(hit_c, dmg_now) # 木头吃全额伤害
+						b["damage"] = maxi(1, dmg_now / 2) # 穿出后伤害减半
+						spawn_impact_fx(hit_p, Color(0.8, 0.6, 0.35))
+				else:
+					spawn_impact_fx(hit_p, Color(1, 0.78, 0.42))
+					dead = true
 		if dead:
 			b["mesh"].queue_free()
 			_bullets.remove_at(i)
@@ -197,7 +242,9 @@ func update_projectiles(dt: float, args: Dictionary) -> void:
 				if gen0 != _gen:
 					return
 				dead = true
-		if not dead and _point_in_colliders(np, colliders):
+		if not dead and not _collider_at(np, colliders).is_empty():
+			# 敌方光弹是低速能量体：任何实体掩体（含木箱）都能挡
+			spawn_impact_fx(np, Color(1, 0.5, 0.3))
 			dead = true
 		if dead:
 			o["mesh"].queue_free()

@@ -48,10 +48,11 @@ var _ak_shots := 0
 
 const HUMANOID := ["rifleman", "runner", "sniper", "mortar", "garth", "langel", "akbar"]
 const TINTS := {
-	"rifleman": Color(0.4, 0.44, 0.24), "runner": Color(0.74, 0.13, 0.09),
-	"sniper": Color(0.36, 0.3, 0.52), "mortar": Color(0.5, 0.38, 0.22),
-	"garth": Color(0.22, 0.24, 0.3), "langel": Color(0.32, 0.42, 0.6),
-	"akbar": Color(0.24, 0.4, 0.48),
+	# 整体提饱和提亮与环境（丛林绿褐/基地灰）拉开距离——用户实测「NPC 糊在背景里看不清」（2026-11-12 三修）
+	"rifleman": Color(0.56, 0.62, 0.24), "runner": Color(0.88, 0.18, 0.1),
+	"sniper": Color(0.52, 0.4, 0.75), "mortar": Color(0.72, 0.5, 0.26),
+	"garth": Color(0.34, 0.37, 0.46), "langel": Color(0.45, 0.58, 0.8),
+	"akbar": Color(0.3, 0.55, 0.6),
 }
 
 func setup(p_type: String, pos: Vector3, ctx: Dictionary, soldier_scene: PackedScene) -> void:
@@ -222,9 +223,12 @@ func _attach_gear() -> void:
 	var tint: Color = TINTS[type]
 	match type:
 		"rifleman":
-			_helmet(skel, tint.darkened(0.35))
+			_helmet(skel, Color(0.78, 0.8, 0.35)) # 亮黄盔，丛林里最扎眼
 		"garth":
 			_helmet(skel, Color(0.16, 0.17, 0.2), 0.55)
+			var visor := _eba(skel, "DEF-head")
+			if visor:
+				Util.box(visor, Vector3(0.17, 0.035, 0.03), Util.glow(Color(1, 0.45, 0.1), 2.2), Vector3(0, 0.1, 0.148))
 			var armor := _pbr(Color(0.2, 0.21, 0.25), 0.42, 0.65)
 			var chest := _eba(skel, "DEF-spine.002")
 			if chest:
@@ -234,9 +238,9 @@ func _attach_gear() -> void:
 				if arm:
 					Util.box(arm, Vector3(0.2, 0.12, 0.24), armor, Vector3(0, 0.03, 0))
 		"langel":
-			_helmet(skel, tint.darkened(0.3), 0.4)
+			_helmet(skel, Color(0.92, 0.94, 0.97), 0.4) # 白盔
 		"mortar":
-			_helmet(skel, tint.darkened(0.35))
+			_helmet(skel, Color(0.85, 0.55, 0.2)) # 亮橙盔
 			var back := _eba(skel, "DEF-spine.002")
 			if back:
 				Util.box(back, Vector3(0.36, 0.46, 0.18), _pbr(Color(0.3, 0.24, 0.14), 0.9), Vector3(0, 0.1, -0.21))
@@ -244,7 +248,7 @@ func _attach_gear() -> void:
 		"sniper":
 			var head := _eba(skel, "DEF-head")
 			if head:
-				var cm := _pbr(tint.darkened(0.3), 0.9)
+				var cm := _pbr(Color(0.62, 0.5, 0.85), 0.9)
 				Util.cyl(head, 0.15, 0.158, 0.085, cm, Vector3(0, 0.185, 0), 12)
 				Util.box(head, Vector3(0.17, 0.025, 0.15), cm, Vector3(0, 0.148, 0.165))
 		"runner":
@@ -259,6 +263,11 @@ func _attach_gear() -> void:
 				band.position = Vector3(0, 0.155, 0)
 				band.rotation.x = PI / 2.0
 				head2.add_child(band)
+	# 统一敌方标识：左臂猩红臂章（水里的 Akbar 除外）——任何距离先认红
+	if type != "akbar":
+		var arm := _eba(skel, "DEF-upper_arm.L")
+		if arm:
+			Util.box(arm, Vector3(0.17, 0.09, 0.19), _pbr(Color(0.8, 0.07, 0.09), 0.7), Vector3(0, -0.08, 0))
 
 ## 一次性反应片段（受击/射击）：播完由 update_enemy 拉回站姿
 func _react(clip: String, dur: float) -> void:
