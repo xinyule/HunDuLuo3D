@@ -302,7 +302,9 @@ func _build_ui() -> void:
 
 func _wrap_center(p: Control) -> void:
 	# 用全屏 CenterContainer 兜底居中——比手算锚点偏移可靠（实测教训）
+	# ⚠️ 包装层必须 IGNORE：全屏容器默认 STOP 会把所有点击吃掉（v3.0.0 菜单点不动的根因）
 	var cc := CenterContainer.new()
+	cc.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	cc.set_anchors_preset(Control.PRESET_FULL_RECT)
 	ui.add_child(cc)
 	cc.add_child(p)
