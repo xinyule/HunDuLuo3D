@@ -1,0 +1,15 @@
+extends SceneTree
+func _init() -> void:
+	print(BaseMaterial3D.TRANSPARENCY_ALPHA)
+	print(BaseMaterial3D.SHADING_MODE_UNSHADED)
+	print(BaseMaterial3D.CULL_DISABLED)
+	print(BaseMaterial3D.BILLBOARD_ENABLED)
+	print(Environment.TONE_MAPPER_ACES)
+	print(Environment.BG_SKY)
+	print(Environment.AMBIENT_SOURCE_SKY)
+	print(Environment.REFLECTION_SOURCE_SKY)
+	print(ParticleProcessMaterial.EMISSION_SHAPE_BOX)
+	print(PlaneMesh.FACE_Z)
+	print(AudioStreamWAV.LOOP_FORWARD)
+	print(DirectionalLight3D.SHADOW_ORTHOGONAL)
+	quit()
