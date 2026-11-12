@@ -3,21 +3,19 @@
 importer="texture"
 type="CompressedTexture2D"
 uid="uid://bh7me2cvvdxxy"
-path.bptc="res://.godot/imported/forest.hdr-480ecf5f5cf59aa8d9fb5b7cdbbec90f.bptc.ctex"
-path.astc="res://.godot/imported/forest.hdr-480ecf5f5cf59aa8d9fb5b7cdbbec90f.astc.ctex"
+path="res://.godot/imported/forest.hdr-480ecf5f5cf59aa8d9fb5b7cdbbec90f.ctex"
 metadata={
-"imported_formats": ["s3tc_bptc", "etc2_astc"],
-"vram_texture": true
+"vram_texture": false
 }
 
 [deps]
 
 source_file="res://assets/hdri/forest.hdr"
-dest_files=["res://.godot/imported/forest.hdr-480ecf5f5cf59aa8d9fb5b7cdbbec90f.bptc.ctex", "res://.godot/imported/forest.hdr-480ecf5f5cf59aa8d9fb5b7cdbbec90f.astc.ctex"]
+dest_files=["res://.godot/imported/forest.hdr-480ecf5f5cf59aa8d9fb5b7cdbbec90f.ctex"]
 
 [params]
 
-compress/mode=2
+compress/mode=0
 compress/high_quality=false
 compress/lossy_quality=0.7
 compress/hdr_compression=1

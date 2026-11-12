@@ -3,21 +3,19 @@
 importer="texture"
 type="CompressedTexture2D"
 uid="uid://cs4mp8f0pq4a6"
-path.bptc="res://.godot/imported/warehouse.hdr-8eab9389658da7e668f568b850bfa6ac.bptc.ctex"
-path.astc="res://.godot/imported/warehouse.hdr-8eab9389658da7e668f568b850bfa6ac.astc.ctex"
+path="res://.godot/imported/warehouse.hdr-8eab9389658da7e668f568b850bfa6ac.ctex"
 metadata={
-"imported_formats": ["s3tc_bptc", "etc2_astc"],
-"vram_texture": true
+"vram_texture": false
 }
 
 [deps]
 
 source_file="res://assets/hdri/warehouse.hdr"
-dest_files=["res://.godot/imported/warehouse.hdr-8eab9389658da7e668f568b850bfa6ac.bptc.ctex", "res://.godot/imported/warehouse.hdr-8eab9389658da7e668f568b850bfa6ac.astc.ctex"]
+dest_files=["res://.godot/imported/warehouse.hdr-8eab9389658da7e668f568b850bfa6ac.ctex"]
 
 [params]
 
-compress/mode=2
+compress/mode=0
 compress/high_quality=false
 compress/lossy_quality=0.7
 compress/hdr_compression=1

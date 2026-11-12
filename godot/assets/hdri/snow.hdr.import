@@ -3,21 +3,19 @@
 importer="texture"
 type="CompressedTexture2D"
 uid="uid://xhdx3f5lqdq7"
-path.bptc="res://.godot/imported/snow.hdr-cdcbf6baa52963774f17d40d8e9ad279.bptc.ctex"
-path.astc="res://.godot/imported/snow.hdr-cdcbf6baa52963774f17d40d8e9ad279.astc.ctex"
+path="res://.godot/imported/snow.hdr-cdcbf6baa52963774f17d40d8e9ad279.ctex"
 metadata={
-"imported_formats": ["s3tc_bptc", "etc2_astc"],
-"vram_texture": true
+"vram_texture": false
 }
 
 [deps]
 
 source_file="res://assets/hdri/snow.hdr"
-dest_files=["res://.godot/imported/snow.hdr-cdcbf6baa52963774f17d40d8e9ad279.bptc.ctex", "res://.godot/imported/snow.hdr-cdcbf6baa52963774f17d40d8e9ad279.astc.ctex"]
+dest_files=["res://.godot/imported/snow.hdr-cdcbf6baa52963774f17d40d8e9ad279.ctex"]
 
 [params]
 
-compress/mode=2
+compress/mode=0
 compress/high_quality=false
 compress/lossy_quality=0.7
 compress/hdr_compression=1
