@@ -28,6 +28,8 @@ var _burst_left := 0
 var _melee_timer := 0.0
 var _facing := PI
 var _flash_t := 0.0
+var _stance_clip := "" # 站姿/常态片段（受击/射击反应播完后回到它）
+var _react_t := 0.0 # 反应片段剩余时间
 var _scored := false
 var _base_x := 0.0
 var _base_y := 0.0
@@ -119,10 +121,11 @@ func _build_soldier(soldier_scene: PackedScene) -> void:
 		if _death_clip:
 			_death_len = _anim.get_animation("Death01").length + 0.3
 		match type:
-			"runner": _anim.play("Jog_Fwd")
-			"akbar": _anim.play("Swim_Idle")
-			"rifleman", "sniper", "garth", "langel": _anim.play("Pistol_Idle")
-			_: _anim.play("Idle")
+			"runner": _stance_clip = "Jog_Fwd"
+			"akbar": _stance_clip = "Swim_Idle"
+			"rifleman", "sniper", "garth", "langel": _stance_clip = "Pistol_Idle"
+			_: _stance_clip = "Idle"
+		_anim.play(_stance_clip)
 	# 枪械（除红衣突击兵无枪、榴弹兵用筒）
 	if type != "runner" and type != "mortar":
 		_attach_gun(_model, type == "sniper")
@@ -130,6 +133,7 @@ func _build_soldier(soldier_scene: PackedScene) -> void:
 		var tube := Util.cyl(self, 0.11, 0.13, 0.85, _pbr(Color(0.2, 0.2, 0.2), 0.5, 0.6), Vector3(0.48, 0.62, 0.15))
 		tube.rotation.z = -0.5
 		Util.box(self, Vector3(0.5, 0.22, 0.5), _pbr(Color(0.27, 0.27, 0.27), 0.6, 0.4), Vector3(0.48, 0.11, 0.15))
+	_attach_gear()
 	if type == "akbar":
 		_model.position.y = -1.05
 		targetable = false
@@ -145,6 +149,10 @@ func _tint_recursive(n: Node, tint: Color) -> void:
 				if orig is StandardMaterial3D:
 					var m := (orig as StandardMaterial3D).duplicate() as StandardMaterial3D
 					m.albedo_color = tint
+					# 与主角同款织物纹理（乘数+法线），纯色面不再塑料感
+					m.albedo_texture = Util.tex_diff("weave")
+					m.normal_texture = Util.tex_nor("weave")
+					m.normal_scale = 0.35
 					m.emission_enabled = false
 					mi.set_surface_override_material(s, m)
 					_mats.append(m)
@@ -188,6 +196,77 @@ func _attach_gun(model: Node3D, long_gun: bool) -> void:
 				return
 	model.add_child(gun)
 	gun.position = Vector3(0.3, 1.1, 0.3)
+
+func _eba(skel: Skeleton3D, bone: String) -> BoneAttachment3D:
+	if skel == null or skel.find_bone(bone) < 0:
+		return null
+	var ba := BoneAttachment3D.new()
+	ba.bone_name = bone
+	skel.add_child(ba)
+	return ba
+
+func _helmet(skel: Skeleton3D, color: Color, metal: float = 0.15) -> void:
+	var head := _eba(skel, "DEF-head")
+	if head == null:
+		return
+	var hm := _pbr(color, 0.55, metal)
+	var dome := Util.sph(head, 0.158, hm, Vector3(0, 0.175, 0), 14, 10)
+	dome.scale = Vector3(1.1, 0.68, 1.12)
+	Util.cyl(head, 0.185, 0.19, 0.028, hm, Vector3(0, 0.132, 0), 14)
+
+## 兵种装备件：头盔/胸甲/肩甲/背包/帽兜/头带——兵种一眼可辨
+func _attach_gear() -> void:
+	var skel := _find_skeleton(_model)
+	if skel == null:
+		return
+	var tint: Color = TINTS[type]
+	match type:
+		"rifleman":
+			_helmet(skel, tint.darkened(0.35))
+		"garth":
+			_helmet(skel, Color(0.16, 0.17, 0.2), 0.55)
+			var armor := _pbr(Color(0.2, 0.21, 0.25), 0.42, 0.65)
+			var chest := _eba(skel, "DEF-spine.002")
+			if chest:
+				Util.box(chest, Vector3(0.38, 0.42, 0.09), armor, Vector3(0, 0.1, 0.155))
+			for side in ["L", "R"]:
+				var arm := _eba(skel, "DEF-upper_arm." + side)
+				if arm:
+					Util.box(arm, Vector3(0.2, 0.12, 0.24), armor, Vector3(0, 0.03, 0))
+		"langel":
+			_helmet(skel, tint.darkened(0.3), 0.4)
+		"mortar":
+			_helmet(skel, tint.darkened(0.35))
+			var back := _eba(skel, "DEF-spine.002")
+			if back:
+				Util.box(back, Vector3(0.36, 0.46, 0.18), _pbr(Color(0.3, 0.24, 0.14), 0.9), Vector3(0, 0.1, -0.21))
+				Util.cyl(back, 0.05, 0.05, 0.4, _pbr(Color(0.55, 0.42, 0.2), 0.6, 0.3), Vector3(0.12, 0.42, -0.21), 8)
+		"sniper":
+			var head := _eba(skel, "DEF-head")
+			if head:
+				var cm := _pbr(tint.darkened(0.3), 0.9)
+				Util.cyl(head, 0.15, 0.158, 0.085, cm, Vector3(0, 0.185, 0), 12)
+				Util.box(head, Vector3(0.17, 0.025, 0.15), cm, Vector3(0, 0.148, 0.165))
+		"runner":
+			var head2 := _eba(skel, "DEF-head")
+			if head2:
+				var band := MeshInstance3D.new()
+				var tm := TorusMesh.new()
+				tm.inner_radius = 0.095
+				tm.outer_radius = 0.148
+				band.mesh = tm
+				band.material_override = _pbr(tint.darkened(0.45), 0.9)
+				band.position = Vector3(0, 0.155, 0)
+				band.rotation.x = PI / 2.0
+				head2.add_child(band)
+
+## 一次性反应片段（受击/射击）：播完由 update_enemy 拉回站姿
+func _react(clip: String, dur: float) -> void:
+	if not alive or _anim == null or _react_t > 0.0:
+		return
+	if _anim.has_animation(clip):
+		_anim.play(clip, 0.05)
+		_react_t = dur
 
 func _build_fallback_soldier() -> void:
 	_model = Node3D.new()
@@ -304,6 +383,8 @@ func on_hit(dmg: int, _point: Vector3 = Vector3.ZERO) -> void:
 			sm.emission = Color(0.4, 0.4, 0.4)
 	if hp <= 0:
 		_die()
+	else:
+		_react("Hit_Chest", 0.3)
 
 func _die() -> void:
 	alive = false
@@ -332,6 +413,7 @@ func _muzzle_pos(h: float) -> Vector3:
 	return global_position + Vector3(sin(_facing) * 0.6, h, cos(_facing) * 0.6)
 
 func _fire_orb(player, speed: float, height: float, inacc: float) -> void:
+	_react("Pistol_Shoot", 0.26)
 	var from := _muzzle_pos(height)
 	var target := Vector3(
 		player.global_position.x + randf_range(-inacc, inacc),
@@ -341,6 +423,7 @@ func _fire_orb(player, speed: float, height: float, inacc: float) -> void:
 	AudioSys.play("enemy_shoot", -10.0)
 
 func _fire_grenade(player, from_h: float = 1.1) -> void:
+	_react("Pistol_Shoot", 0.26)
 	var from := _muzzle_pos(from_h)
 	var t := 1.35
 	var g := 16.0
@@ -362,6 +445,10 @@ func update_enemy(dt: float, player, camera_pos: Vector3) -> bool:
 			global_position.y = _base_y - (1.0 - k) * 0.35
 		return _death_t <= 0.0
 	_t += dt
+	if _react_t > 0.0:
+		_react_t -= dt
+		if _react_t <= 0.0 and alive and _anim and _stance_clip != "":
+			_anim.play(_stance_clip, 0.12)
 	if _flash_t > 0.0:
 		_flash_t -= dt
 		if _flash_t <= 0.0:

@@ -13,7 +13,7 @@ static func tex_diff(n: String) -> Texture2D:
 static func tex_nor(n: String) -> Texture2D:
 	var k := n + "_nor"
 	if not _tex_cache.has(k):
-		_tex_cache[k] = load("res://assets/tex/%s_nor.jpg" % k)
+		_tex_cache[k] = load("res://assets/tex/%s.jpg" % k)
 	return _tex_cache[k]
 
 static func pbr(color: Color, tex_name: String = "", rough: float = 0.85, metal: float = 0.0, rep: Vector2 = Vector2.ONE) -> StandardMaterial3D:

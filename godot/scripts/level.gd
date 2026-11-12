@@ -290,6 +290,67 @@ func _fern(x: float, z: float, rand: RandomNumberGenerator) -> void:
 	f.scale = Vector3.ONE * rand.randf_range(1.1, 1.9)
 	add_child(f)
 
+var _grass_mat_c: Material = null
+
+func _grass_mat() -> Material:
+	if _grass_mat_c == null:
+		var m := StandardMaterial3D.new()
+		m.albedo_texture = load("res://assets/tex/foliage_cluster.png")
+		m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR
+		m.alpha_scissor_threshold = 0.35
+		m.cull_mode = BaseMaterial3D.CULL_DISABLED
+		m.roughness = 1.0
+		_grass_mat_c = m
+	return _grass_mat_c
+
+## 草丛：叶团贴图十字卡，挂进 _sway 随风摆
+func _grass(x: float, z: float, rand: RandomNumberGenerator) -> void:
+	var pivot := Node3D.new()
+	pivot.position = Vector3(x, get_support_y(x, z, 999.0), z)
+	add_child(pivot)
+	var h := rand.randf_range(0.55, 0.95)
+	for a in [0.0, PI / 2.0]:
+		var card := MeshInstance3D.new()
+		var pm := PlaneMesh.new()
+		pm.size = Vector2(0.85, h)
+		card.mesh = pm
+		card.material_override = _grass_mat()
+		card.position.y = h / 2.0
+		card.rotation.y = a + rand.randf_range(-0.3, 0.3)
+		pivot.add_child(card)
+	_sway.append({"pivot": pivot, "phase": rand.randf() * TAU})
+
+## 环境漂浮微粒（丛林光尘/瀑布水雾）：软点贴图 + 广告牌四边形
+func _add_motes(count: int, tint: Color) -> void:
+	var p := GPUParticles3D.new()
+	p.amount = count
+	p.lifetime = 10.0
+	p.preprocess = 10.0
+	var pm := ParticleProcessMaterial.new()
+	pm.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_BOX
+	pm.emission_box_extents = Vector3(width / 2.0 + 4.0, 2.6, length / 2.0)
+	pm.direction = Vector3(0, 1, 0)
+	pm.spread = 180.0
+	pm.initial_velocity_min = 0.1
+	pm.initial_velocity_max = 0.35
+	pm.gravity = Vector3(0.12, 0.03, 0)
+	pm.scale_min = 0.6
+	pm.scale_max = 1.4
+	p.process_material = pm
+	var quad := QuadMesh.new()
+	quad.size = Vector2(0.14, 0.14)
+	var qm := StandardMaterial3D.new()
+	qm.albedo_texture = load("res://assets/tex/mote.png")
+	qm.albedo_color = tint
+	qm.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	qm.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	qm.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
+	quad.material = qm
+	p.draw_pass_1 = quad
+	p.position = Vector3(0, 2.4, 26.0 - length / 2.0)
+	p.visibility_aabb = AABB(Vector3(-40, -6, -length - 20), Vector3(80, 16, length + 40))
+	add_child(p)
+
 func _rock_glb(x: float, z: float, rand: RandomNumberGenerator) -> void:
 	if _rock_scene == null:
 		_rock_scene = load("res://assets/veg/rock_face_01.glb")
@@ -329,6 +390,8 @@ func _theme_jungle() -> void:
 	_scatter(rand, 8, func(x, z, r): _rock(x, z, r))
 	_scatter(rand, 14, func(x, z, r): _fern(x, z, r))
 	_scatter(rand, 5, func(x, z, r): _rock_glb(x, z, r))
+	_scatter(rand, 16, func(x, z, r): _grass(x, z, r))
+	_add_motes(42, Color(1, 0.95, 0.8, 0.8))
 	# 河 + 爆裂木桥（原作第1关标志）
 	var river_z := 26.0 - 70.0
 	_bridge_z = river_z
@@ -421,6 +484,8 @@ func _theme_waterfall() -> void:
 	pool.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(pool)
 	_scatter(rand, 8, func(x, z, r): _add_box(x, z, 1.1, 1.1, 1.0, Util.pbr(Color(1, 1, 1), "planks", 0.9)))
+	_scatter(rand, 10, func(x, z, r): _grass(x, z, r))
+	_add_motes(30, Color(0.85, 0.95, 1, 0.7))
 
 func _theme_snow() -> void:
 	var rand := Util.seeded(4404)

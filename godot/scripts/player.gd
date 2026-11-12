@@ -34,6 +34,9 @@ var _anim: AnimationPlayer
 var _aim_mod: AimModifier
 var _cur_clip := ""
 var _sprinting := false
+var _hit_t := 0.0 # 受击反应剩余时间
+var _land_t := 0.0 # 落地动作剩余时间
+var _recoil := 0.0 # 开火后坐（0..1，驱动胸骨后仰）
 var _shield: MeshInstance3D
 var _flash: MeshInstance3D
 
@@ -46,8 +49,8 @@ func setup(char_id: String) -> void:
 	_char_id = char_id
 	_build_mesh()
 
-func _mat(c: Color, rough: float = 0.8, metal: float = 0.0) -> StandardMaterial3D:
-	return Util.pbr(c, "", rough, metal)
+func _mat(c: Color, rough: float = 0.8, metal: float = 0.0, tex: String = "") -> StandardMaterial3D:
+	return Util.pbr(c, tex, rough, metal)
 
 func _build_mesh() -> void:
 	var pal: Dictionary = Data.CHARACTERS[_char_id]
@@ -108,7 +111,10 @@ func _tint_model(n: Node, main_color: Color) -> void:
 					var m := (orig as StandardMaterial3D).duplicate() as StandardMaterial3D
 					# 关节面（M_Joints）压暗当阴影色，主体面用肤色——模型无贴图，直接定色
 					m.albedo_color = main_color.darkened(0.42) if orig.resource_name.contains("Joint") else main_color
-					m.albedo_texture = null
+					# 织物纹理（近白乘数 + 法线）：只加布料经纬与皮肤起伏，不改定色
+					m.albedo_texture = Util.tex_diff("weave")
+					m.normal_texture = Util.tex_nor("weave")
+					m.normal_scale = 0.35
 					mi.set_surface_override_material(s, m)
 	for c in n.get_children():
 		_tint_model(c, main_color)
@@ -136,7 +142,7 @@ func _attach_identity(skel: Skeleton3D, pal: Dictionary) -> void:
 		Util.box(head, Vector3(0.09, 0.24, 0.03), band_m, Vector3(0.08, -0.02, -0.155))
 		# 白背心：筒形壳裹住躯干（挂 spine.002，平板会像广告牌——实测教训）
 		var chest := _bone_attach(skel, "DEF-spine.002")
-		var vest_m := _mat(pal["top"], 0.95)
+		var vest_m := _mat(pal["top"], 0.95, 0.0, "weave")
 		var vest := Util.cyl(chest, 0.20, 0.165, 0.52, vest_m, Vector3(0, 0.10, 0), 12)
 		vest.scale = Vector3(1.3, 1, 0.85)
 	else:
@@ -146,20 +152,29 @@ func _attach_identity(skel: Skeleton3D, pal: Dictionary) -> void:
 		cap.scale = Vector3(1, 0.85, 1)
 		Util.box(head, Vector3(0.24, 0.36, 0.07), hair_m, Vector3(0, 0.0, -0.13))
 		var chest := _bone_attach(skel, "DEF-spine.003")
-		var strap := Util.box(chest, Vector3(0.46, 0.09, 0.38), _mat(Color(0.25, 0.18, 0.1), 0.85), Vector3(0, 0.1, 0))
+		var strap := Util.box(chest, Vector3(0.46, 0.09, 0.38), _mat(Color(0.25, 0.18, 0.1), 0.85, 0.0, "weave"), Vector3(0, 0.1, 0))
 		strap.rotation.z = 0.6
+		# 子弹带正面一排黄铜子弹粒
+		var brass := _mat(Color(0.85, 0.62, 0.25), 0.35, 0.9)
+		for i in 6:
+			Util.cyl(strap, 0.021, 0.021, 0.055, brass, Vector3(-0.15 + float(i) * 0.06, 0.01, 0.20), 8)
 
 func _attach_pants(skel: Skeleton3D, pal: Dictionary) -> void:
-	var pants_m := _mat(pal["pants"], 0.9)
+	var pants_m := _mat(pal["pants"], 0.9, 0.0, "weave")
 	var boot_m := _mat(Color(0.08, 0.07, 0.06), 0.7)
+	var pad_m := _mat(Color(0.12, 0.12, 0.13), 0.6, 0.2)
 	var hips := _bone_attach(skel, "DEF-hips")
 	Util.box(hips, Vector3(0.42, 0.3, 0.3), pants_m, Vector3(0, 0.03, 0))
 	Util.box(hips, Vector3(0.44, 0.08, 0.32), _mat(Color(0.3, 0.2, 0.1), 0.8), Vector3(0, 0.16, 0))
+	# 皮带扣（黄铜）
+	Util.box(hips, Vector3(0.1, 0.06, 0.025), _mat(Color(0.8, 0.65, 0.3), 0.3, 0.9), Vector3(0, 0.16, 0.163))
 	for side in ["L", "R"]:
 		var thigh := _bone_attach(skel, "DEF-thigh." + side)
 		Util.cyl(thigh, 0.11, 0.095, 0.54, pants_m, Vector3(0, -0.26, 0), 10)
 		var shin := _bone_attach(skel, "DEF-shin." + side)
 		Util.cyl(shin, 0.09, 0.075, 0.52, pants_m, Vector3(0, -0.25, 0), 10)
+		# 护膝
+		Util.box(shin, Vector3(0.17, 0.19, 0.05), pad_m, Vector3(0, -0.16, 0.082))
 		var foot := _bone_attach(skel, "DEF-foot." + side)
 		Util.box(foot, Vector3(0.11, 0.09, 0.27), boot_m, Vector3(0, -0.04, 0.05))
 
@@ -219,6 +234,8 @@ func take_damage(cells: int) -> bool:
 		_cur_clip = ""
 		_play_clip("Death01")
 		died.emit()
+	else:
+		_hit_t = 0.32 # 没打死 → 受击反应片段
 	return true
 
 func heal(n: int) -> void:
@@ -243,6 +260,7 @@ func update_player(dt: float, snap: Dictionary, level, p_aim_yaw: float, p_aim_p
 	if barrier > 0.0: barrier = maxf(0.0, barrier - dt)
 	_shield.visible = barrier > 0.0
 	if fire_timer > 0.0: fire_timer -= dt
+	if _recoil > 0.0: _recoil = maxf(0.0, _recoil - dt * 5.0)
 	if _flash_t > 0.0:
 		_flash_t -= dt
 		var m: StandardMaterial3D = _flash.material_override
@@ -299,6 +317,7 @@ func update_player(dt: float, snap: Dictionary, level, p_aim_yaw: float, p_aim_p
 		var s2: float = level.get_support_y(nx, nz, global_position.y)
 		if global_position.y <= s2:
 			global_position.y = s2
+			if vy < -5.0: _land_t = 0.22 # 重落地才播落地片段
 			vy = 0.0
 			grounded = true
 			_flip = 0.0
@@ -351,7 +370,7 @@ func _sync_visual(_dt: float, moving: bool, aiming: bool) -> void:
 	rotation.y = facing
 	# 瞄准俯仰 → 胸骨后处理（移动瞄准时上身跟随准星）
 	if _aim_mod:
-		var target_pitch := (aim_pitch * 0.55) if aiming else 0.0
+		var target_pitch := ((aim_pitch * 0.55) if aiming else 0.0) - _recoil * 0.13
 		_aim_mod.pitch = lerpf(_aim_mod.pitch, target_pitch, 0.35)
 	var clip := "Idle"
 	if not grounded:
@@ -375,6 +394,14 @@ func _sync_visual(_dt: float, moving: bool, aiming: bool) -> void:
 				clip = "Sprint"
 			else:
 				clip = "Jog_Fwd"
+	# 一次性动作片段优先：受击 > 落地
+	if _hit_t > 0.0: _hit_t -= _dt
+	if _land_t > 0.0: _land_t -= _dt
+	if grounded and not prone:
+		if _hit_t > 0.0:
+			clip = "Hit_Chest"
+		elif _land_t > 0.0:
+			clip = "Jump_Land"
 	_play_clip(clip)
 
 func muzzle_world() -> Vector3:
@@ -409,6 +436,7 @@ func try_shoot(projectiles, aim_point: Vector3) -> bool:
 	var m: StandardMaterial3D = _flash.material_override
 	m.albedo_color.a = 0.9
 	_flash_t = 0.05
+	_recoil = 1.0 # 后坐：胸骨短暂后仰（_sync_visual 消费）
 	AudioSys.play("shoot" if weapon != "M" else "shoot_m", -4.0)
 	return true
 
