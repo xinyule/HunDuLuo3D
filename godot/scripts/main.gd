@@ -282,6 +282,9 @@ func _build_ui() -> void:
 	var hint := _label("WASD移动 | 鼠标镜头 | 左键射击 | 右键瞄准 | 空格跳 | C趴下 | Shift疾跑 | M音乐\n秘籍 ↑↑↓↓←→←→BA = 30命 · 命尽可续关3次 · 打飞鹰换枪 S/M/F/L", 12, Color(0.55, 0.6, 0.55))
 	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	mv.add_child(hint)
+	var ver := _label("版本 v" + Data.VERSION, 12, Color(0.45, 0.5, 0.45))
+	ver.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	mv.add_child(ver)
 	_wrap_center(menu_panel)
 	# ---- 操作说明 ----
 	controls_panel = PanelContainer.new()

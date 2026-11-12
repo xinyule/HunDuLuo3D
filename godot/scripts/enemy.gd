@@ -154,6 +154,7 @@ func _tint_recursive(n: Node, tint: Color) -> void:
 					m.albedo_texture = Util.tex_diff("weave")
 					m.normal_texture = Util.tex_nor("weave")
 					m.normal_scale = 0.35
+					m.texture_filter = 5 # 各向异性过滤
 					m.emission_enabled = false
 					mi.set_surface_override_material(s, m)
 					_mats.append(m)

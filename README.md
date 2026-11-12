@@ -4,10 +4,8 @@
 
 ## 立即玩
 
-- **网页版（GitHub Pages）**：https://xinyule.github.io/HunDuLuo3D/ — 打开即玩（首次加载约 80MB，请耐心等进度条）
+- **网页版（GitHub Pages）**：https://xinyule.github.io/HunDuLuo3D/ — 打开即玩（首次加载约 65MB，请耐心等进度条）
 - **Android APK / Windows 版**：到 [Releases](../../releases) 下载（APK 为本地自签，安卓需允许「安装未知应用」；Windows 解压后 exe 与 pck 须放在同一目录）
-
-> 旧 Three.js 版（v2.1）保留在 [`classic/`](classic/) 目录，Pages 上访问 `/classic/` 可玩。
 
 ## 原作复原要点
 
@@ -49,4 +47,3 @@
 
 - 仓库根目录：网页版构建产物（GitHub Pages 直接托管）
 - `godot/`：Godot 工程源码
-- `classic/`：旧 Three.js 版存档

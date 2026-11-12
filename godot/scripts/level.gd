@@ -249,6 +249,7 @@ func _leaf_material(snow: bool) -> Material:
 		return _leaf_mat
 	var m := StandardMaterial3D.new()
 	m.albedo_texture = load("res://assets/tex/foliage_cluster_snow.png" if snow else "res://assets/tex/foliage_cluster.png")
+	m.texture_filter = 5 # 各向异性过滤
 	m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR
 	m.alpha_scissor_threshold = 0.35
 	m.cull_mode = BaseMaterial3D.CULL_DISABLED
@@ -305,6 +306,7 @@ func _grass_mat() -> Material:
 	if _grass_mat_c == null:
 		var m := StandardMaterial3D.new()
 		m.albedo_texture = load("res://assets/tex/foliage_cluster.png")
+		m.texture_filter = 5 # 各向异性过滤
 		m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR
 		m.alpha_scissor_threshold = 0.35
 		m.cull_mode = BaseMaterial3D.CULL_DISABLED

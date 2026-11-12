@@ -21,6 +21,7 @@ static func pbr(color: Color, tex_name: String = "", rough: float = 0.85, metal:
 	m.albedo_color = color
 	m.roughness = rough
 	m.metallic = metal
+	m.texture_filter = 5 # TEXTURE_FILTER_LINEAR_WITH_MIPMAPS_ANISOTROPIC：各向异性过滤，斜着看地面/墙面贴图不糊（现代 3D 标配）
 	if tex_name != "":
 		m.albedo_texture = tex_diff(tex_name)
 		m.normal_texture = tex_nor(tex_name)

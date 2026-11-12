@@ -115,6 +115,7 @@ func _tint_model(n: Node, main_color: Color) -> void:
 					m.albedo_texture = Util.tex_diff("weave")
 					m.normal_texture = Util.tex_nor("weave")
 					m.normal_scale = 0.35
+					m.texture_filter = 5 # 各向异性过滤
 					mi.set_surface_override_material(s, m)
 	for c in n.get_children():
 		_tint_model(c, main_color)

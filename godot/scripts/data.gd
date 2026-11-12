@@ -4,6 +4,9 @@ extends RefCounted
 ## 全局数据层 —— 关卡/敌人/Boss/武器全部数据化（与原作解析文档的名册对应）
 ## 关卡：玩家从 z=26 向 -Z 推进；spawns=[推进米数, 类型, 横向偏移]
 
+## 版本号单一出处：主菜单显示它，每次发版只改这一处
+const VERSION := "3.0.4"
+
 const PLAYER := {
 	"height": 1.7, "prone_height": 0.55, "radius": 0.38,
 	"walk_speed": 7.5, "run_speed": 11.5, "prone_speed": 3.2,
