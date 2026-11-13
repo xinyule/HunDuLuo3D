@@ -88,10 +88,10 @@ jobs:
           import os, re
           p = "godot/export_presets.cfg"
           txt = open(p, encoding="utf-8").read()
-          # 仓库预设已自带 version/name="1.1.0"、version/code=2（1.1.0 起修进仓库）；runner 上再强制对齐一次防漂移
-          txt = re.sub(r'version/name="[^"]*"', 'version/name="1.1.0"', txt)
-          txt = re.sub(r'version/code=\d+', 'version/code=2', txt)
-          assert 'version/name="1.1.0"' in txt and 'version/code=2' in txt
+          # 仓库预设已自带 version/name="1.2.0"、version/code=3（1.2.0 起修进仓库）；runner 上再强制对齐一次防漂移
+          txt = re.sub(r'version/name="[^"]*"', 'version/name="1.2.0"', txt)
+          txt = re.sub(r'version/code=\d+', 'version/code=3', txt)
+          assert 'version/name="1.2.0"' in txt and 'version/code=3' in txt
           ks_lines = (
               'keystore/debug=""\n'
               'keystore/debug_user=""\n'
@@ -104,7 +104,7 @@ jobs:
           assert anchor in txt
           txt = txt.replace(anchor, anchor + "\n" + ks_lines, 1)
           open(p, "w", encoding="utf-8").write(txt)
-          print("android preset prepared on runner (keystore lines injected, version/name=1.1.0, version/code=2)")
+          print("android preset prepared on runner (keystore lines injected, version/name=1.2.0, version/code=3)")
           PYEOF
 
       - name: Export Windows

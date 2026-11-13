@@ -1160,6 +1160,7 @@ func _load_level(idx: int) -> void:
 		"on_score": _add_score,
 		"on_kill": _on_kill,
 		"on_encounter": _on_encounter,
+		"on_lock_msg": func(t): _center_msg(String(t)),
 		"on_pickup": func(letter): if is_instance_valid(player): player.apply_pickup(letter),
 		"on_checkpoint": func(pos): checkpoint = pos,
 		"on_boss_activated": _on_boss_activated,
@@ -1599,7 +1600,10 @@ func _update_edge_arrow() -> void:
 		_edge_arrow.visible = false
 		return
 	var target := Vector3.ZERO
-	if current_level.boss_activated and current_level.boss and current_level.boss.alive:
+	var lock_tgt: Vector3 = current_level.lock_arrow_target(player.global_position)
+	if lock_tgt != Vector3.ZERO:
+		target = lock_tgt # 封锁区残敌（≤2）优先指引，防找人烦躁
+	elif current_level.boss_activated and current_level.boss and current_level.boss.alive:
 		target = current_level.boss.global_position + Vector3(0, 3.0, 0)
 	else:
 		var best := 1.0e18

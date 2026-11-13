@@ -108,10 +108,10 @@ func _init() -> void:
 	cap.radial_segments = 8
 	cap.rings = 4
 	_bullet_geo = cap
-	# 敌弹：橙红光弹，半径 0.15→0.20 放大可读性
+	# 敌弹：橙红光弹，半径 0.12（1.2.0：用户反馈太大，0.20→0.12 即 0.6 倍；判定为点-盒与视觉半径无关，不动）
 	_orb_geo = SphereMesh.new()
-	_orb_geo.radius = 0.2
-	_orb_geo.height = 0.4
+	_orb_geo.radius = 0.12
+	_orb_geo.height = 0.24
 	_orb_geo.radial_segments = 10
 	_orb_geo.rings = 6
 	_disc_geo = CylinderMesh.new()
@@ -285,7 +285,7 @@ func _set_trail(mesh: MeshInstance3D, on: bool) -> void:
 		for rot in [Vector3(0, PI / 2, 0), Vector3(PI / 2, 0, 0)]:
 			var q := MeshInstance3D.new()
 			var qm := QuadMesh.new()
-			qm.size = Vector2(0.85, 0.15)
+			qm.size = Vector2(0.55, 0.1) # 1.2.0：随弹体缩小同步收细（原 0.85×0.15）
 			qm.material = _trail_mat
 			q.mesh = qm
 			q.rotation = rot
@@ -377,7 +377,7 @@ func spawn_player_bullet(from: Vector3, dir: Vector3, w: Dictionary) -> void:
 		"mesh": mesh, "pos": from, "dir": dir,
 		"speed": float(w["bullet_speed"]), "damage": int(w["damage"]),
 		"pierce": bool(w["pierce"]), "wave": wave, "s0": s0,
-		"life": 2.2, "gen": _gen, "pen": [], "pool": _free_bullets,
+		"life": 1.1, "gen": _gen, "pen": [], "pool": _free_bullets, # 1.2.0：存活 2.2→1.1s，最大射程全线减半
 	})
 
 ## boom>0：重弹（坦克炮/Boss 弹）——命中时播全套爆炸视觉（纯表现，不加任何伤判）
@@ -390,7 +390,7 @@ func spawn_orb(from: Vector3, dir: Vector3, speed: float, damage: int = 1, boom:
 	mesh.scale = Vector3.ONE
 	_set_trail(mesh, true)
 	mesh.global_position = from
-	_orbs.append({"mesh": mesh, "pos": from, "dir": dir, "speed": speed * orb_speed_scale, "damage": damage, "life": 6.0, "gen": _gen, "r": 0.2, "boom": boom, "pool": _free_orbs})
+	_orbs.append({"mesh": mesh, "pos": from, "dir": dir, "speed": speed * orb_speed_scale, "damage": damage, "life": 6.0, "gen": _gen, "r": 0.12, "boom": boom, "pool": _free_orbs})
 
 func spawn_disc(from: Vector3, dir: Vector3, speed: float) -> void:
 	var mesh := _take(_free_discs)
@@ -547,35 +547,52 @@ func update_projectiles(dt: float, args: Dictionary) -> void:
 		b["pos"] = np
 		var dead := float(b["life"]) <= 0.0
 		if not dead:
+			# 同一步内敌人与掩体竞争：按沿弹道距离 t 取舍（掩体在前则先结算掩体）。
+			# 旧顺序敌人整段先判：敌人贴掩体站位时子弹「穿箱直击」且木箱不吃伤害
+			# （1.2.0 智能 AI 让敌人贴箱蹲守后此路径可达，cover 套件实测）。
+			var hit_t = null
+			var hit_tt := 2.0
+			var seg := np - prev
+			var seg_len := seg.length()
 			for t in targets:
 				if not t.alive or t.get("targetable") == false:
 					continue
 				if _seg_sphere(prev, np, Vector3(t.hit_x, t.hit_y, t.hit_z), float(t.hit_r)):
-					t.on_hit(int(b["damage"]), np)
-					if gen0 != _gen:
-						return # 回调链中发生了 clear_all，整帧放弃
-					if on_enemy_hit.is_valid():
-						on_enemy_hit.call() # 命中确认 → main 顿帧（带冷却防连发叠加）
-					if not bool(b["pierce"]):
-						dead = true
-					break
-		if not dead:
-			# 中点+终点双采样，防高速子弹一步跨过薄掩体
+					var tt := 0.0
+					if seg_len > 0.001:
+						tt = clampf((Vector3(t.hit_x, t.hit_y, t.hit_z) - prev).dot(seg) / (seg_len * seg_len), 0.0, 1.0)
+					if tt < hit_tt:
+						hit_tt = tt
+						hit_t = t
+			# 掩体采样：中点+终点双采样，防高速子弹一步跨过薄掩体
 			var hit_c := _collider_at((prev + np) * 0.5, colliders)
 			var hit_p := (prev + np) * 0.5
+			var col_tt := 0.5
 			if hit_c.is_empty():
 				hit_c = _collider_at(np, colliders)
 				hit_p = np
-			if not hit_c.is_empty():
+				col_tt = 1.0
+			if not hit_c.is_empty() and (b["pen"] as Array).has(hit_c):
+				hit_c = {} # 已穿过的木箱不再结算
+			var enemy_after := false # 掩体在前且为木头：先结算掩体，子弹减半后续击敌人
+			if not hit_c.is_empty() and (hit_t == null or col_tt <= hit_tt):
 				if String(hit_c.get("mat", "hard")) == "wood":
-					if not (b["pen"] as Array).has(hit_c):
-						(b["pen"] as Array).append(hit_c)
-						var dmg_now := int(b["damage"])
-						_damage_wood(hit_c, dmg_now) # 木头吃全额伤害
-						b["damage"] = maxi(1, dmg_now / 2) # 穿出后伤害减半
-						spawn_impact_fx(hit_p, Color(0.8, 0.6, 0.35))
+					(b["pen"] as Array).append(hit_c)
+					var dmg_now := int(b["damage"])
+					_damage_wood(hit_c, dmg_now) # 木头吃全额伤害
+					b["damage"] = maxi(1, dmg_now / 2) # 穿出后伤害减半
+					spawn_impact_fx(hit_p, Color(0.8, 0.6, 0.35))
+					enemy_after = hit_t != null
 				else:
 					spawn_impact_fx(hit_p, Color(1, 0.78, 0.42))
+					dead = true
+			if hit_t != null and (enemy_after or hit_c.is_empty() or hit_tt < col_tt):
+				hit_t.on_hit(int(b["damage"]), np)
+				if gen0 != _gen:
+					return # 回调链中发生了 clear_all，整帧放弃
+				if on_enemy_hit.is_valid():
+					on_enemy_hit.call() # 命中确认 → main 顿帧（带冷却防连发叠加）
+				if not bool(b["pierce"]):
 					dead = true
 		if not dead and th.is_valid():
 			# 地形阻挡：中点+终点采样，子弹钻进山坡/地面即止（开放地形必须有这一层）

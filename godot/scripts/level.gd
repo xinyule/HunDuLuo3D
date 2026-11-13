@@ -74,6 +74,7 @@ var enemies: Array = []
 var sensors: Array = []
 var barrels: Array = []
 var gates: Array = []
+var locks: Array = [] # 1.2.0 封锁点：{entry, exit, z, field, collider, members, active, cleared}
 var flames: Array = []
 var carts: Array = []
 var crushers: Array = []
@@ -363,6 +364,7 @@ func _add_crate(x: float, z: float, w: float, d: float, h: float, mat: Material)
 	c["mat"] = "wood"
 	c["hp"] = 40.0
 	c["node"] = mi
+	c["cover"] = true # 1.2.0：掩体登记——colliders 即掩体表，cover 标记供 NPC 躲掩体 AI 检索
 	return mi
 
 ## 分阶段建造（1.1.0 体验项：加载过程显示）：旧 _build() 按原顺序切成 5 个阶段，
@@ -434,7 +436,7 @@ func _stage_enemies() -> void:
 		"on_score": _ctx["on_score"],
 		"on_defeated": _ctx["on_boss_defeated"],
 		"on_core_exposed": _ctx.get("on_core_exposed", Callable()),
-		"spawn_minion": func(t, x, z): _spawn_enemy(t, x, z),
+		"spawn_minion": func(t, x, z): return _spawn_enemy(t, x, z), # 1.2.0：带 return——最终 Boss 要拿增援引用做存活上限计数
 	})
 	# Boss 本体封路：全宽封锁到围界——打死前不能从侧翼绕到 Boss 垫侧面/背面输出（击败后在更新循环里解除）
 	_boss_blocker = _add_collider({"type": "box", "x": 0.0, "z": boss_z, "w": width + 24.0, "d": 2.2, "h": 9.0, "y0": boss_y})
@@ -444,6 +446,66 @@ func _stage_enemies() -> void:
 	for f in _falcon_queue:
 		f["done"] = true
 		pickups.spawn_falcon(26.0 - float(f["dist"]), String(f["letter"]), minf(44.0, playable_half_width() - 2.0)) # 巡逻带：避开边缘山脊，且不飞出玩家可达范围（1.1.0）
+	_build_locks()
+
+## 1.2.0 封锁点建造（数据 data["locks"] = [[入口dist, 出口dist], ...]）：
+## 出口处预置门框（边柱+顶梁，常显作预告）与能量墙（初始隐藏、无碰撞）；
+## 成员＝出生 dist 落在 [entry, exit] 的预置敌人（建关时按 _home 分配、固定不变）
+func _build_locks() -> void:
+	for zi in data.get("locks", []).size():
+		var pair: Array = data["locks"][zi]
+		var entry := float(pair[0])
+		var exitd := float(pair[1])
+		var z := 26.0 - exitd
+		var frame_m := Util.pbr(Color(0.22, 0.25, 0.28), "", 0.5, 0.6)
+		# 门框必须跟地形走：1.2.0 地形起伏 ×2 后坡面可达 5~9m，绝对高度的顶梁会被埋进
+		# 坡面变成永久横墙堵死路线（routes 实测 lane 45 卡在梁前）——顶梁只作视觉、
+		# 高度按中心地形抬升且不带碰撞；边柱按各自落点地形落座
+		var ground_c := terrain_h(0.0, z)
+		_add_box(-(width / 2.0 - 1.0), z, 2, 1, 6, frame_m, terrain_h(-(width / 2.0 - 1.0), z) - 0.3)
+		_add_box(width / 2.0 - 1.0, z, 2, 1, 6, frame_m, terrain_h(width / 2.0 - 1.0, z) - 0.3)
+		_add_box(0, z, width, 1, 1, frame_m, ground_c + 5.0, false)
+		var field := MeshInstance3D.new()
+		var fp := PlaneMesh.new()
+		fp.size = Vector2(width - 4.0, 5.0)
+		fp.orientation = PlaneMesh.FACE_Z
+		field.mesh = fp
+		field.material_override = Util.flat(Color(0.2, 0.8, 1, 0.38))
+		field.position = Vector3(0, ground_c + 2.5, z)
+		field.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		field.visible = false
+		add_child(field)
+		# 场碰撞加高（y0=-2、h=14）：覆盖高坡地形上玩家的身体窗口，坡下也不留缝
+		var collider := _add_collider({"type": "box", "x": 0.0, "z": z, "w": width + 3.2, "d": 0.9, "h": 14.0, "y0": -2.0})
+		collider["disabled"] = true
+		var members: Array = []
+		for e in enemies:
+			var ed: float = 26.0 - e._home.z
+			if ed >= entry and ed <= exitd:
+				members.append(e)
+		locks.append({"entry": entry, "exit": exitd, "z": z, "field": field, "collider": collider, "members": members, "active": false, "cleared": false})
+
+## 封锁箭头目标：任一活跃封锁区只剩 ≤2 名成员时，返回最近残敌位置（main 边缘箭头调用）；否则 ZERO
+func lock_arrow_target(ppos: Vector3) -> Vector3:
+	var best := 1.0e18
+	var tgt := Vector3.ZERO
+	for lk in locks:
+		if not bool(lk["active"]) or bool(lk["cleared"]):
+			continue
+		var alive_n := 0
+		var near := Vector3.ZERO
+		var nd := 1.0e18
+		for e in lk["members"]:
+			if is_instance_valid(e) and e.alive:
+				alive_n += 1
+				var d: float = ppos.distance_squared_to(e.global_position)
+				if d < nd:
+					nd = d
+					near = e.global_position
+		if alive_n > 0 and alive_n <= 2 and nd < best:
+			best = nd
+			tgt = near + Vector3(0, 1.6, 0)
+	return tgt
 func _stage_emblems() -> void:
 	# 内容批：隐藏鹰徽（每关 3 枚）——此时主题摆件/建筑碰撞都已就位，y 取支撑面（塔顶/屋内地面都对）
 	if data.has("emblems"):
@@ -1020,7 +1082,8 @@ func _boulder(x: float, z: float, rand: RandomNumberGenerator) -> void:
 		rock.scale = Vector3(s * rand.randf_range(1.0, 1.35), s * rand.randf_range(0.6, 0.85), s * rand.randf_range(0.9, 1.2))
 		rock.rotation.y = rand.randf() * TAU
 		add_child(rock)
-		_add_collider({"type": "circle", "x": x + ox, "z": z + oz, "r": s * 1.0, "h": s * 1.15, "y0": base_y})
+		var bc := _add_collider({"type": "circle", "x": x + ox, "z": z + oz, "r": s * 1.0, "h": s * 1.15, "y0": base_y})
+		bc["cover"] = true # 1.2.0：岩石掩体登记（hard 全挡+挡视线，cover 标记供躲掩体 AI 检索）
 
 func _quiver(x: float, z: float, rand: RandomNumberGenerator) -> void:
 	if _slope_grad(x, z) > 0.62:
@@ -1043,7 +1106,8 @@ func _rock(x: float, z: float, rand: RandomNumberGenerator, scale_r: float = 0.9
 	rock.scale = Vector3(1.2, 0.75, 1.0) * scale_r
 	rock.rotation.y = rand.randf() * TAU
 	add_child(rock)
-	_add_collider({"type": "circle", "x": x, "z": z, "r": scale_r * 0.8, "h": scale_r, "y0": gy})
+	var rc := _add_collider({"type": "circle", "x": x, "z": z, "r": scale_r * 0.8, "h": scale_r, "y0": gy})
+	rc["cover"] = true # 1.2.0：岩石掩体登记（同 _boulder）
 
 func _theme_jungle() -> void:
 	var rand := Util.seeded(1101 + level_index * 77)
@@ -1053,10 +1117,10 @@ func _theme_jungle() -> void:
 			if rand.randf() > 0.25:
 				_tree(s * (width / 2.0 + 2.4 + rand.randf() * 3.0), 26.0 - d, rand, false, rand.randf_range(0.9, 1.6))
 		d += 7.0
-	_scatter(rand, 12, func(x, z, r): _add_crate(x, z, 1.1, 1.1, 1.1, Util.pbr(Color(1, 1, 1), "planks", 0.9, 0.0, Vector2.ONE)))
-	_scatter(rand, 8, func(x, z, r): _rock(x, z, r))
+	_scatter(rand, 30, func(x, z, r): _add_crate(x, z, 1.1, 1.1, 1.1, Util.pbr(Color(1, 1, 1), "planks", 0.9, 0.0, Vector2.ONE)))
+	_scatter(rand, 64, func(x, z, r): _rock(x, z, r))
 	_scatter(rand, 24, func(x, z, r): _fern(x, z, r))
-	_scatter(rand, 5, func(x, z, r): _boulder(x, z, r))
+	_scatter(rand, 8, func(x, z, r): _boulder(x, z, r))
 	_scatter(rand, 16, func(x, z, r): _grass(x, z, r))
 	# 林地内部再散布大小树（大树成荫、小树点缀），全图铺草地毯
 	_scatter(rand, 12, func(x, z, r): _tree(x, z, r, false, r.randf_range(0.55, 1.5)))
@@ -1111,24 +1175,38 @@ func _theme_jungle() -> void:
 
 func _theme_base() -> void:
 	var rand := Util.seeded(2202 + level_index * 77)
-	var wall_mat := Util.pbr(Color(0.85, 0.88, 0.95), "metal", 0.5, 0.65, Vector2(6, 2.0))
+	# 1.2.0：仅第 2 关（theme=base）净高 ×4 做通天大厅——侧墙 9.0→36、天花板净高 8.6→34.4、灯带随之；
+	# 第 4 关（theme=base2）同函数但维持原高。墙面贴图纵向重复同步放大，免得拉成糊墙。
+	var tall := String(data["theme"]) == "base"
+	var wall_h := 36.0 if tall else 9.0
+	var ceil_y := 34.4 if tall else 8.6
+	var strip_y := 34.0 if tall else 8.5
+	var wall_mat := Util.pbr(Color(0.85, 0.88, 0.95), "metal", 0.5, 0.65, Vector2(6, 8.0) if tall else Vector2(6, 2.0))
 	# 侧墙带真实碰撞（1.1.0 空气墙根因修复：旧版无碰撞、全靠玩家钳制挡人，钳制线又远在墙内）；
 	# 起点前移补住出生点身后 z∈(26,42) 的墙列缺口。墙高 6.5→9.0（净高修复，见下天花板）
 	var d := -16.0
 	while d < length + 30.0:
 		for s in [-1.0, 1.0]:
-			_add_box(s * (width / 2.0 + 1.4), 26.0 - d - 7.5, 1.6, 15.0, 9.0, wall_mat)
+			_add_box(s * (width / 2.0 + 1.4), 26.0 - d - 7.5, 1.6, 15.0, wall_h, wall_mat)
 		d += 15.0
 	d = 14.0
 	while d < length:
 		# 天花板梁板：净高 6.2→8.6（1.1.0 用户反馈房间太低；与能量关 7m 立柱+通高、仓库通高对齐量级）
-		_add_box(0, 26.0 - d, width + 2.0, 0.8, 0.5, Util.pbr(Color(0.13, 0.15, 0.18), "", 0.6, 0.5), 8.6, false)
+		_add_box(0, 26.0 - d, width + 2.0, 0.8, 0.5, Util.pbr(Color(0.13, 0.15, 0.18), "", 0.6, 0.5), ceil_y, false)
 		var strip_m := Util.glow(Color(0.55, 0.8, 1.0), 1.8)
-		var strip := Util.box(self, Vector3(width - 2.0, 0.08, 0.3), strip_m, Vector3(0, 8.5, 26.0 - d))
+		var strip := Util.box(self, Vector3(width - 2.0, 0.08, 0.3), strip_m, Vector3(0, strip_y, 26.0 - d))
 		strip.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		_blink_mats.append({"mat": strip_m, "phase": d})
+		if tall:
+			# 大厅防黑：两侧墙面在 12m / 23m 高处各加一条纵向光带（与天花板灯带同节拍闪烁体系）
+			for s in [-1.0, 1.0]:
+				for wy in [12.0, 23.0]:
+					var wm2 := Util.glow(Color(0.55, 0.8, 1.0), 1.5)
+					var ws := Util.box(self, Vector3(0.18, 0.3, 13.0), wm2, Vector3(s * (width / 2.0 + 0.45), wy, 26.0 - d))
+					ws.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+					_blink_mats.append({"mat": wm2, "phase": d + wy})
 		d += 22.0
-	_scatter(rand, 10, func(x, z, r): _add_box(x, z, 1.2, 1.2, 1.2, Util.pbr(Color(0.6, 0.65, 0.55), "metal", 0.6, 0.5)))
+	_scatter(rand, 24, func(x, z, r): _add_box(x, z, 1.2, 1.2, 1.2, Util.pbr(Color(0.6, 0.65, 0.55), "metal", 0.6, 0.5)))
 	_scatter(rand, 9, Callable(self, "_make_barrel"))
 	# 两侧灯柱阵列：基地的纵深感靠它们一列排开
 	var ld := 12.0
@@ -1236,7 +1314,8 @@ func _ice_rock(x: float, z: float, rand: RandomNumberGenerator) -> void:
 	rock.scale = Vector3(1.25, 0.7, 1.0) * s
 	rock.rotation.y = rand.randf() * TAU
 	add_child(rock)
-	_add_collider({"type": "circle", "x": x, "z": z, "r": s * 0.8, "h": s, "y0": gy})
+	var ic := _add_collider({"type": "circle", "x": x, "z": z, "r": s * 0.8, "h": s, "y0": gy})
+	ic["cover"] = true # 1.2.0：冰岩掩体登记（同 _rock）
 
 func _shelf(x: float, z: float, rand: RandomNumberGenerator) -> void:
 	var gy := terrain_h(x, z)
@@ -1362,7 +1441,8 @@ func _theme_waterfall() -> void:
 		_rock(-26.0 + cos(ang) * 7.6, -38.0 + sin(ang) * 5.6, prand, prand.randf_range(1.0, 1.6))
 	if data.has("cave"):
 		_build_cave()
-	_scatter(rand, 8, func(x, z, r): _add_crate(x, z, 1.1, 1.1, 1.0, Util.pbr(Color(1, 1, 1), "planks", 0.9)))
+	_scatter(rand, 20, func(x, z, r): _add_crate(x, z, 1.1, 1.1, 1.0, Util.pbr(Color(1, 1, 1), "planks", 0.9)))
+	_scatter(rand, 20, func(x, z, r): _rock(x, z, r))
 	_scatter(rand, 10, func(x, z, r): _grass(x, z, r))
 	_scatter(rand, 3, Callable(self, "_log"))
 	# 坡面分三股（调平表 §3.3）：ramp 本是全宽均匀爬升、走哪都一样，用摆件切出三条读得出差别的线——
@@ -1392,7 +1472,7 @@ func _theme_snow() -> void:
 		d += 8.0
 	_scatter(rand, 12, Callable(self, "_make_snowbank"))
 	_scatter(rand, 9, func(x, z, r): _tree(x, z, r, true, r.randf_range(0.55, 1.3)))
-	_scatter(rand, 7, Callable(self, "_ice_rock"))
+	_scatter(rand, 48, Callable(self, "_ice_rock"))
 	_grass_field(int(1300.0 * _grass_scale), true, 5151)
 	_snow_extras(rand)
 	if data.has("outpost"):
@@ -1405,7 +1485,7 @@ func _make_snowbank(x: float, z: float, _r: RandomNumberGenerator) -> void:
 	_add_collider({"type": "circle", "x": x, "z": z, "r": 1.5, "h": 1.1, "y0": gy})
 
 func _snow_extras(rand: RandomNumberGenerator) -> void:
-	_scatter(rand, 6, func(x, z, r): _add_crate(x, z, 1.15, 1.15, 1.15, Util.pbr(Color(1, 1, 1), "planks", 0.9)))
+	_scatter(rand, 15, func(x, z, r): _add_crate(x, z, 1.15, 1.15, 1.15, Util.pbr(Color(1, 1, 1), "planks", 0.9)))
 	# 吹雪（日版独有动态）
 	_snow = GPUParticles3D.new()
 	_snow.amount = 420
@@ -1446,13 +1526,14 @@ func _theme_energy() -> void:
 		add_child(strip)
 		_blink_mats.append({"mat": sm, "phase": d * 0.4})
 		d += 18.0
-	_scatter(rand, 8, func(x, z, r): _add_box(x, z, 1.2, 1.2, 1.3, Util.pbr(Color(0.8, 0.6, 0.4), "rust", 0.75, 0.4)))
+	_scatter(rand, 16, func(x, z, r): _add_box(x, z, 1.2, 1.2, 1.3, Util.pbr(Color(0.8, 0.6, 0.4), "rust", 0.75, 0.4)))
 	_scatter(rand, 5, Callable(self, "_make_barrel"))
 	d = 20.0
 	while d < length:
 		_quiver((1.0 if int(d) % 52 < 26 else -1.0) * (width / 2.0 + 4.5), 26.0 - d, rand)
 		d += 26.0
-	_scatter(rand, 5, func(x, z, r): _boulder(x, z, r))
+	_scatter(rand, 12, func(x, z, r): _boulder(x, z, r))
+	_scatter(rand, 24, func(x, z, r): _rock(x, z, r))
 
 func _theme_hangar() -> void:
 	var rand := Util.seeded(6606)
@@ -1468,7 +1549,8 @@ func _theme_hangar() -> void:
 			_add_box(s * (width / 2.0 + 2.4), 26.0 - d - 4.0, 3.4, 7.5, 3.1, cont_mats[ci % cont_mats.size()], 0.0, false)
 			ci += 1
 		d += 16.0
-	_scatter(rand, 10, func(x, z, r): _add_crate(x, z, 1.25, 1.25, 1.25, Util.pbr(Color(1, 1, 1), "planks", 0.9)))
+	_scatter(rand, 25, func(x, z, r): _add_crate(x, z, 1.25, 1.25, 1.25, Util.pbr(Color(1, 1, 1), "planks", 0.9)))
+	_scatter(rand, 16, func(x, z, r): _rock(x, z, r))
 	# 货架改两排纵列切三巷（调平表 §3.7）：x=±14 两列长货架（每 ~31m 留一个换巷口，两列错开），
 	# 切出左/中/右三条货架巷——中巷最直但压顶机+矿车双险，侧巷掩体多、有伏击（数据层营地），三巷等长
 	for row_i in 2:
@@ -1516,6 +1598,7 @@ func _theme_alien() -> void:
 		d += 26.0
 	# 妖卵 Eggron：靠近孵化把妖虫
 	_scatter(rand, 9, Callable(self, "_make_egg"))
+	_scatter(rand, 24, func(x, z, r): _rock(x, z, r))
 	# 两翼各补 1 簇卵（调平表 §3.8）：堵掉「侧翼全程免费」，绕行也要付孢子压力
 	_make_egg(-30.0, 26.0 - length * 0.45, rand)
 	_make_egg(-27.0, 26.0 - length * 0.48, rand)
@@ -2072,6 +2155,44 @@ func update_level(dt: float, player, camera_pos: Vector3) -> void:
 	for g in gates:
 		if g["sensor"].alive:
 			(g["field"] as MeshInstance3D).material_override.albedo_color.a = 0.3 + sin(time * 7.0) * 0.12
+	# 1.2.0 封锁点：玩家进区且区内有活敌→出口升墙+全员警戒接敌；肃清→落墙（永不重锁）
+	for lk in locks:
+		if bool(lk["cleared"]):
+			continue
+		var lf := lk["field"] as MeshInstance3D
+		if bool(lk["active"]):
+			lf.material_override.albedo_color.a = 0.3 + sin(time * 7.0) * 0.12
+			var any_alive := false
+			for e in lk["members"]:
+				if is_instance_valid(e) and e.alive:
+					any_alive = true
+					break
+			if not any_alive:
+				lk["cleared"] = true
+				lk["active"] = false
+				lk["collider"]["disabled"] = true
+				lf.visible = false
+				if _ctx.has("on_lock_msg"):
+					_ctx["on_lock_msg"].call("封锁解除")
+		elif dist >= float(lk["entry"]) and dist < float(lk["exit"]) + 30.0:
+			var any_alive2 := false
+			for e in lk["members"]:
+				if is_instance_valid(e) and e.alive:
+					any_alive2 = true
+					break
+			if any_alive2:
+				lk["active"] = true
+				lk["collider"]["disabled"] = false
+				lf.visible = true
+				for e in lk["members"]:
+					if is_instance_valid(e) and e.alive:
+						e._alert = true
+						e._last_seen = player.global_position
+						e._seen_age = 0.0
+				if _ctx.has("on_lock_msg"):
+					_ctx["on_lock_msg"].call("肃清本区敌人解除封锁")
+			else:
+				lk["cleared"] = true # 进区前已被远处打光：静默通过，不升墙
 	# 火焰喷口
 	for f in flames:
 		var t := fmod(time + float(f["phase"]), float(f["period"]))

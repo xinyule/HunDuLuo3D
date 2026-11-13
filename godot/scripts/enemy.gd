@@ -58,6 +58,26 @@ var _ak_phase := 0 # 0潜伏 1升起 2射击 3下沉
 var _ak_timer := 0.0
 var _ak_shots := 0
 
+# 1.2.0 智能行为层：站立射手的战术状态机（掩体/探头/横移/压近/搜索），
+# 只在 update_enemy 的已激活路径里运行；远处降频步进的敌人根本走不到这里，零额外开销。
+const TAC_COVER := ["rifleman", "garth", "langel", "sniper", "shield"]
+const TAC_RETREAT := ["mortar", "bomber"]
+var _tac_state := 0 # 0交战 1去掩体 2躲掩体 3去探头 4探头射击 5搜索 6归营
+var _tac_t := 0.0
+var _cover_stand := Vector3.ZERO
+var _peek_pos := Vector3.ZERO
+var _cover_col: Dictionary = {}
+var _has_cover := false
+var _suppress_fire := false
+var _hit_cover_want := false # on_hit 置位：挨打想躲掩体（触发时掷骰）
+var _decide_t := 0.0 # 战术决策计时（残血/周期触发找掩体）
+var _strafe_t := 0.0
+var _strafe_dir := 1.0
+var _seen_age := 99.0 # 距上次目击玩家的秒数（视线复核块刷新）
+var _last_seen := Vector3.ZERO
+var _sep_t := 0.0
+var _sep_vec := Vector2.ZERO
+
 const HUMANOID := ["rifleman", "runner", "sniper", "mortar", "garth", "langel", "akbar", "bomber", "shield"]
 const TINTS := {
 	# 整体提饱和提亮与环境（丛林绿褐/基地灰）拉开距离——用户实测「NPC 糊在背景里看不清」（2026-11-12 三修）
@@ -71,8 +91,8 @@ const TINTS := {
 ## 新兵种数值兜底（4A 线）：Data.ENEMIES 的正式条目在 data.gd（合并阶段抄入，值须与此严格一致）；
 ## setup 先查 Data.ENEMIES、缺失才用这里，保证合并前后行为不变。
 const FALLBACK_DATA := {
-	"bomber": {"hp": 30, "speed": 0.0, "radius": 0.55, "score": 200, "fire_interval": 2.9, "orb_speed": 0.0, "range": 36.0},
-	"shield": {"hp": 30, "speed": 2.2, "radius": 0.55, "score": 250, "fire_interval": 3.0, "orb_speed": 17.0, "range": 40.0},
+	"bomber": {"hp": 30, "speed": 0.0, "radius": 0.55, "score": 200, "fire_interval": 1.45, "orb_speed": 0.0, "range": 18.0},
+	"shield": {"hp": 30, "speed": 2.2, "radius": 0.55, "score": 250, "fire_interval": 1.5, "orb_speed": 17.0, "range": 20.0},
 }
 
 func setup(p_type: String, pos: Vector3, ctx: Dictionary, soldier_scenes: Dictionary) -> void:
@@ -159,6 +179,7 @@ func _build_soldier(soldier_scene: PackedScene) -> void:
 		_build_shield_prop()
 	# 警觉标记：发现玩家瞬间头顶冒「！」（先有反应、再开火，不是站桩靶子）
 	_alert_icon = Label3D.new()
+	_alert_icon.font = preload("res://assets/font/noto_sc_full.otf") # 显式打包字体，不依赖系统回退（网页端无系统字体）
 	_alert_icon.text = "!"
 	_alert_icon.font_size = 128
 	_alert_icon.modulate = Color(1, 0.55, 0.15)
@@ -570,6 +591,8 @@ func on_hit(dmg: int, _point: Vector3 = Vector3.ZERO) -> void:
 					prs.spawn_hit_fx(_point, "spark")
 				return
 	_alert = true # 挨打即交战（哪怕没看见人）
+	if type in TAC_COVER:
+		_hit_cover_want = true # 挨打触发找掩体意图（状态机里 65% 采纳，免得人人同帧同动作）
 	hp -= dmg
 	var pr = _ctx.get("projectiles")
 	if pr and _point != Vector3.ZERO:
@@ -699,6 +722,9 @@ func update_enemy(dt: float, player, camera_pos: Vector3) -> bool:
 		_los_ok = _compute_los(player)
 		if _los_ok and dist < float(_data.get("range", 30.0)) * 1.25:
 			_alert = true
+		if _los_ok and _alert:
+			_last_seen = player.global_position # 搜索行为的目击点（1.2.0 智能层）
+			_seen_age = 0.0
 	if dist < 9.0 and player.alive:
 		_alert = true
 	# 警觉表现：刚发现玩家时「！」弹出 0.85 秒；未交战的站桩射手在营地里巡逻走动
@@ -719,19 +745,23 @@ func update_enemy(dt: float, player, camera_pos: Vector3) -> bool:
 			elev = clampf(atan2(player.chest_y() - (global_position.y + 1.3), dist), -0.55, 0.55)
 		_aim_mod_e.pitch = lerpf(_aim_mod_e.pitch, elev * 0.75, minf(1.0, dt * 8.0))
 
+	# 1.2.0 智能行为层：掩体/探头/横移/压近/搜索的战术移动与开火抑制
+	# （固定/载具/近战类在函数内部直接返回，不受影响）
+	_update_tactics(dt, player, dist)
+
 	match type:
 		"rifleman", "garth", "langel":
 			if _alert:
 				_face_player()
 			_fire_timer -= dt
-			if _fire_timer <= 0.0 and dist < float(_data["range"]) and player.alive and _alert and _los_ok:
+			if _fire_timer <= 0.0 and dist < float(_data["range"]) and player.alive and _alert and _los_ok and not _suppress_fire:
 				_fire_timer = float(_data["fire_interval"]) * randf_range(0.85, 1.2)
 				_fire_orb(player, float(_data["orb_speed"]), 1.25, 0.5)
 		"sniper":
 			if _alert:
 				_face_player()
 			_fire_timer -= dt
-			if _fire_timer <= 0.0 and dist < float(_data["range"]) and player.alive and _alert and _los_ok:
+			if _fire_timer <= 0.0 and dist < float(_data["range"]) and player.alive and _alert and _los_ok and not _suppress_fire:
 				_fire_timer = float(_data["fire_interval"])
 				_fire_orb(player, float(_data["orb_speed"]), 1.3, 0.25)
 		"mortar":
@@ -753,7 +783,7 @@ func update_enemy(dt: float, player, camera_pos: Vector3) -> bool:
 			# 盾牌兵：举盾缓步逼近到 11m 内停步，偶尔从盾后开火（正面子弹被盾挡，见 on_hit）
 			if _alert:
 				_face_player()
-				if dist > 11.0 and player.alive:
+				if dist > 11.0 and player.alive and _tac_state == 0:
 					var sp2 := float(_data.get("speed", 2.2))
 					global_position.x += dx / dist * sp2 * dt
 					global_position.z += dz / dist * sp2 * dt
@@ -764,7 +794,7 @@ func update_enemy(dt: float, player, camera_pos: Vector3) -> bool:
 				else:
 					_play_e(_stance_clip)
 				_fire_timer -= dt
-				if _fire_timer <= 0.0 and dist < float(_data["range"]) and player.alive and _los_ok:
+				if _fire_timer <= 0.0 and dist < float(_data["range"]) and player.alive and _los_ok and not _suppress_fire:
 					_fire_timer = float(_data["fire_interval"]) * randf_range(0.9, 1.15)
 					_fire_orb(player, float(_data["orb_speed"]), 1.25, 0.5)
 		"statue":
@@ -844,6 +874,10 @@ func update_enemy(dt: float, player, camera_pos: Vector3) -> bool:
 	hit_z = global_position.z
 	if type != "akbar":
 		hit_y = global_position.y + (1.7 if type == "tank" else 0.95 if type == "turret" else 1.6 if type == "statue" else 1.0)
+		if _tac_state == 2 and type in TAC_COVER:
+			hit_y = global_position.y + 0.55 # 躲掩体蹲姿：命中点压低（矮掩体由此真正挡弹）
+	if _model and type in TAC_COVER:
+		_model.position.y = -0.38 if _tac_state == 2 else 0.0 # 蹲姿视觉：模型下沉
 	if type == "spore":
 		global_position.y = _base_y + absf(sin(_t * 9.0)) * 0.22
 		hit_y = global_position.y + 0.6
@@ -936,7 +970,7 @@ func _update_akbar(dt: float, player, dist: float) -> void:
 			_face_player()
 			_fire_timer -= dt
 			if _fire_timer <= 0.0 and _ak_shots > 0:
-				_fire_timer = 0.8
+				_fire_timer = 0.4
 				_ak_shots -= 1
 				_fire_orb(player, float(_data["orb_speed"]), 1.35, 0.4)
 			if _ak_timer <= 0.0:
@@ -949,6 +983,387 @@ func _update_akbar(dt: float, player, dist: float) -> void:
 			if _ak_timer <= 0.0:
 				_ak_phase = 0
 				_ak_timer = randf_range(1.2, 2.4)
+
+## ================= 1.2.0 智能行为层 =================
+## 设计一句话：站立射手交战中会躲掩体—探头打一轮—再躲，平时横移不站桩、看得见够不着会
+## 压近、丢目标去目击点搜索；迫击/掷弹被逼近会后撤。全部只作用于已激活个体。
+
+func _tac_speed() -> float:
+	match type:
+		"sniper":
+			return 3.0
+		"shield":
+			return 2.6
+		_:
+			return 3.3
+
+## 点位是否被实体碰撞体挡住（掩体/墙/建筑）：矮台（顶面低于膝高步幅）与头顶平台不算挡
+func _point_blocked(x: float, z: float, my_y: float) -> bool:
+	var lvl = _ctx.get("level")
+	if lvl == null:
+		return false
+	for c in lvl.colliders:
+		if bool(c.get("disabled", false)) or bool(c.get("no_collide", false)):
+			continue
+		var y0 := float(c.get("y0", 0.0))
+		var top := y0 + float(c.get("h", 6.0))
+		if top < my_y + 0.55 or y0 > my_y + 1.3:
+			continue
+		if c["type"] == "box":
+			if absf(x - float(c["x"])) <= float(c["w"]) * 0.5 + 0.45 and absf(z - float(c["z"])) <= float(c["d"]) * 0.5 + 0.45:
+				return true
+		elif c["type"] == "circle":
+			var ddx := x - float(c["x"])
+			var ddz := z - float(c["z"])
+			var r := float(c["r"]) + 0.45
+			if ddx * ddx + ddz * ddz <= r * r:
+				return true
+	return false
+
+## 战术移动：朝 dest 走——钳制在可玩半宽/关内、不穿实体（单轴滑墙）、贴地。返回剩余水平距离
+func _tac_move(dest: Vector3, speed: float, dt: float) -> float:
+	var lvl = _ctx.get("level")
+	var tox := dest.x - global_position.x
+	var toz := dest.z - global_position.z
+	var d := sqrt(tox * tox + toz * toz)
+	if d < 0.08:
+		return 0.0
+	var step := minf(d, speed * dt)
+	var dirx := tox / d
+	var dirz := toz / d
+	var nx := global_position.x + dirx * step
+	var nz := global_position.z + dirz * step
+	if lvl:
+		var hw: float = lvl.playable_half_width() - 0.7
+		nx = clampf(nx, -hw, hw)
+		nz = clampf(nz, -lvl.length - 2.0, 28.0)
+		if _point_blocked(nx, nz, global_position.y):
+			if not _point_blocked(nx, global_position.z, global_position.y):
+				nz = global_position.z
+			elif not _point_blocked(global_position.x, nz, global_position.y):
+				nx = global_position.x
+			else:
+				# 三向全堵（掩体簇窄缝/墙角）：试 8 向小步，取第一个不堵且不远离目标的——绕障脱困
+				var escaped := false
+				for ang in [0.78, -0.78, 1.57, -1.57, 2.36, -2.36, 3.14]:
+					var cs := cos(ang)
+					var sn := sin(ang)
+					var rx2: float = dirx * cs - dirz * sn
+					var rz2: float = dirx * sn + dirz * cs
+					var tx: float = clampf(global_position.x + rx2 * step, -hw, hw)
+					var tz: float = clampf(global_position.z + rz2 * step, -lvl.length - 2.0, 28.0)
+					if _point_blocked(tx, tz, global_position.y):
+						continue
+					var ndx := dest.x - tx
+					var ndz := dest.z - tz
+					if sqrt(ndx * ndx + ndz * ndz) <= d + 0.05:
+						nx = tx
+						nz = tz
+						escaped = true
+						break
+				if not escaped:
+					return d
+	global_position.x = nx
+	global_position.z = nz
+	if lvl:
+		global_position.y = lvl.get_support_y(nx, nz, global_position.y)
+	_play_e("Walk")
+	var rx := dest.x - nx
+	var rz := dest.z - nz
+	return sqrt(rx * rx + rz * rz)
+
+## 就近检索掩体（cover 标记的岩石/箱子）：站位须在掩体背玩家侧、蹲姿（1.0m）视线被挡、
+## 且有探头位（侧移或站立）能重新看见玩家；被同伴占用的跳过。成功存 _cover_stand/_peek_pos
+# 密集采样版遮挡判定：has_los 只查内点（i=1..steps-1）且步长 2.5m，起点附近与
+# 小掩体（r<1.2）会被结构性漏检；这里按 has_los 同一谓词（地形+碰撞体高度窗+圆/盒包含）
+# 以 0.5m 步长含端点逐点查，任一点被挡即算被挡（与弹道线段碰撞口径对齐）。
+func _los_blocked_dense(a: Vector3, b: Vector3) -> bool:
+	var lvl = _ctx.get("level")
+	if lvl == null:
+		return false
+	var n := int(ceil(a.distance_to(b) / 0.5))
+	if n < 1:
+		n = 1
+	for i in range(n + 1):
+		var p: Vector3 = a.lerp(b, float(i) / float(n))
+		if lvl.terrain_h(p.x, p.z) > p.y + 0.3:
+			return true
+		for c in lvl.colliders:
+			if c.get("disabled", false) or c.get("no_collide", false):
+				continue
+			var y0 := float(c.get("y0", 0.0))
+			if p.y < y0 or p.y > y0 + float(c.get("h", 6.0)):
+				continue
+			if c["type"] == "box":
+				if absf(p.x - float(c["x"])) <= float(c["w"]) / 2.0 and absf(p.z - float(c["z"])) <= float(c["d"]) / 2.0:
+					return true
+			elif c["type"] == "circle":
+				var dx: float = p.x - float(c["x"])
+				var dz: float = p.z - float(c["z"])
+				var r := float(c["r"])
+				if dx * dx + dz * dz <= r * r:
+					return true
+	return false
+
+func _find_cover(player) -> bool:
+	var lvl = _ctx.get("level")
+	if lvl == null:
+		return false
+	var tgt := Vector3(player.global_position.x, player.chest_y(), player.global_position.z)
+	var best := 1.0e9
+	var found := false
+	for c in lvl.colliders:
+		if not bool(c.get("cover", false)) or bool(c.get("disabled", false)):
+			continue
+		var cx := float(c["x"])
+		var cz := float(c["z"])
+		var tocx := cx - global_position.x
+		var tocz := cz - global_position.z
+		var dc := sqrt(tocx * tocx + tocz * tocz)
+		if dc > 15.0 or dc < 1.0:
+			continue
+		var ax: float = cx - player.global_position.x
+		var az: float = cz - player.global_position.z
+		var ad := sqrt(ax * ax + az * az)
+		if ad < 0.5:
+			continue
+		ax /= ad
+		az /= ad
+		var ext := 0.0
+		if c["type"] == "circle":
+			ext = float(c["r"])
+		else:
+			ext = maxf(float(c["w"]), float(c["d"])) * 0.5
+		var sx: float = cx + ax * (ext + 0.6)
+		var sz: float = cz + az * (ext + 0.6)
+		var hw: float = lvl.playable_half_width() - 0.7
+		if absf(sx) > hw:
+			continue
+		var sy: float = lvl.get_support_y(sx, sz, global_position.y + 2.0)
+		var top := float(c.get("y0", 0.0)) + float(c.get("h", 6.0))
+		if top - sy < 0.55:
+			continue # 掩体太矮，蹲下也挡不住（蹲姿命中点 0.55，见状态机躲掩体态）
+		var stand := Vector3(sx, sy, sz)
+		if not _los_blocked_dense(stand + Vector3(0, 0.6, 0), tgt):
+			continue # 蹲姿仍暴露——不算掩体
+		var peek := Vector3.ZERO
+		var ok := false
+		var px := -az
+		var pz := ax
+		for sgn in [1.0, -1.0]:
+			var s := float(sgn)
+			var qx: float = sx + px * s * (ext + 0.85)
+			var qz: float = sz + pz * s * (ext + 0.85)
+			if absf(qx) > hw:
+				continue
+			var qy: float = lvl.get_support_y(qx, qz, global_position.y + 2.0)
+			if lvl.has_los(Vector3(qx, qy + 1.45, qz), tgt) and Vector3(qx, qy, qz).distance_to(player.global_position) <= float(_data.get("range", 20.0)):
+				peek = Vector3(qx, qy, qz)
+				ok = true
+				break
+		if not ok and lvl.has_los(stand + Vector3(0, 1.45, 0), tgt) and stand.distance_to(player.global_position) <= float(_data.get("range", 20.0)):
+			peek = stand # 原地站立探头（矮掩体后站直射击）
+			ok = true
+		if not ok:
+			continue
+		var taken := false
+		for e in lvl.enemies:
+			if e != self and e.alive and e._has_cover and e._cover_stand.distance_to(stand) < 1.3:
+				taken = true
+				break
+		if taken:
+			continue
+		var score := dc
+		if type == "sniper":
+			score -= clampf(top - sy - 1.0, 0.0, 2.0) # 狙击手偏好更高掩体
+		if score < best:
+			best = score
+			found = true
+			_cover_stand = stand
+			_peek_pos = peek
+			_cover_col = c
+	if found:
+		_has_cover = true
+	return found
+
+func _update_tactics(dt: float, player, dist: float) -> void:
+	_suppress_fire = false
+	if type in TAC_RETREAT:
+		# 迫击/掷弹：被逼近时后撤拉开距离（弧线火力不停）
+		if _alert and player.alive and dist < 9.0 and dist > 0.05:
+			var away: Vector3 = global_position - player.global_position
+			away.y = 0.0
+			_tac_move(global_position + away.normalized() * 6.0, 2.6, dt)
+			rotation.y = _facing
+		return
+	if not (type in TAC_COVER):
+		return
+	if not _alert or not player.alive:
+		_tac_state = 0
+		_has_cover = false
+		_cover_col = {}
+		return
+	_seen_age += dt
+	# 分散站位：错峰计算与近旁同伴的排斥，交战中持续轻推，避免扎堆同一点
+	_sep_t -= dt
+	if _sep_t <= 0.0:
+		_sep_t = 0.3
+		_sep_vec = Vector2.ZERO
+		var lvl0 = _ctx.get("level")
+		if lvl0:
+			for e in lvl0.enemies:
+				if e == self or not e.alive or not e._alert:
+					continue
+				var ox: float = global_position.x - e.global_position.x
+				var oz: float = global_position.z - e.global_position.z
+				var od := sqrt(ox * ox + oz * oz)
+				if od > 0.05 and od < 1.9:
+					_sep_vec += Vector2(ox, oz) / od * (1.9 - od)
+	if _sep_vec.length() > 0.05 and _tac_state != 1 and _tac_state != 3:
+		var push := _sep_vec.limit_length(1.2)
+		var px2 := global_position.x + push.x * dt * 1.6
+		var pz2 := global_position.z + push.y * dt * 1.6
+		var lvl1 = _ctx.get("level")
+		if lvl1 and not _point_blocked(px2, pz2, global_position.y):
+			var hw1: float = lvl1.playable_half_width() - 0.7
+			global_position.x = clampf(px2, -hw1, hw1)
+			global_position.z = pz2
+			global_position.y = lvl1.get_support_y(px2, pz2, global_position.y)
+	var range_f := float(_data.get("range", 20.0))
+	match _tac_state:
+		0: # 交战：掩体触发判定 / 搜索分发 / 压近 / 横移
+			var want := false
+			_decide_t -= dt
+			if _hit_cover_want:
+				_hit_cover_want = false
+				if randf() < 0.65:
+					want = true
+			if hp * 3 < max_hp and _decide_t <= 0.0:
+				want = true # 残血优先躲
+			if _decide_t <= 0.0:
+				_decide_t = randf_range(3.5, 7.0)
+				if randf() < 0.4:
+					want = true # 战术间隔随机躲一轮
+			if want and _find_cover(player):
+				_tac_state = 1
+				# 时限按路程给：远掩体+绕障可能要 6-8s，固定 4s 会半路放弃
+				_tac_t = clampf(global_position.distance_to(_cover_stand) / (_tac_speed() + 0.5), 2.5, 8.0) + 1.5
+				_suppress_fire = true
+				return
+			if _seen_age > 3.0 and not _los_ok and dist > 5.0 and _last_seen != Vector3.ZERO:
+				_tac_state = 5 # 丢目标：去最后目击点搜索
+				_tac_t = 9.0
+				_suppress_fire = true
+				return
+			if type == "shield":
+				return # 盾兵的逼近由其分支自有逻辑负责
+			if _los_ok and dist > range_f * 1.05 and dist < 60.0:
+				# 看得见却够不着：向玩家压近（但不离开营地太远）
+				if global_position.distance_to(_home) < 26.0:
+					_tac_move(player.global_position, _tac_speed(), dt)
+					rotation.y = _facing
+					_suppress_fire = true
+				return
+			_strafe_t -= dt
+			if _strafe_t <= 0.0:
+				_strafe_t = randf_range(0.55, 1.15)
+				if randf() < 0.7:
+					_strafe_dir = -_strafe_dir
+			if dist < range_f:
+				# 横移换位：朝向玩家、垂直方向蛇行，不站桩挨打；撞掩体走不动就换向
+				var fwd := Vector2(player.global_position.x - global_position.x, player.global_position.z - global_position.z)
+				if fwd.length() > 0.1:
+					fwd = fwd.normalized()
+					var side := Vector2(fwd.y, -fwd.x) * _strafe_dir
+					var srem := _tac_move(global_position + Vector3(side.x, 0, side.y) * 2.2, 2.4, dt)
+					if srem > 2.0:
+						_strafe_dir = -_strafe_dir
+					rotation.y = _facing
+		1: # 去掩体
+			_suppress_fire = true
+			if dist < 5.0:
+				_tac_state = 0 # 玩家已贴脸，躲没意义，转交战
+				return
+			var rem := _tac_move(_cover_stand, _tac_speed() + 0.5, dt)
+			_tac_t -= dt
+			if rem < 0.45:
+				_tac_state = 2
+				_tac_t = randf_range(2.2, 3.6) if type == "sniper" else randf_range(1.2, 2.6)
+				_play_e(_stance_clip)
+			elif _tac_t <= 0.0:
+				_tac_state = 0
+				_decide_t = randf_range(2.0, 4.0)
+		2: # 躲掩体：停驻不开火，等探头时机
+			_suppress_fire = true
+			_play_e(_stance_clip)
+			if bool(_cover_col.get("disabled", false)):
+				_tac_state = 0 # 掩体被打烂了（木箱），立刻出来
+				_has_cover = false
+				_cover_col = {}
+				return
+			_tac_t -= dt
+			if _tac_t <= 0.0 or (_seen_age > 3.0 and not _los_ok):
+				# 目标久未现身：提前探头确认（别傻躲——探头看不到人会转搜索）
+				_tac_state = 3
+				_tac_t = 3.0
+		3: # 去探头位
+			_suppress_fire = true
+			if dist < 5.0:
+				_tac_state = 0
+				return
+			var rem3 := _tac_move(_peek_pos, _tac_speed(), dt)
+			_tac_t -= dt
+			if rem3 < 0.4:
+				_tac_state = 4
+				_tac_t = randf_range(1.8, 3.2)
+				_play_e(_stance_clip)
+			elif _tac_t <= 0.0:
+				_tac_state = 4
+				_tac_t = 1.2
+		4: # 探头射击：开火走分支原逻辑；到时决定回掩体还是转交战
+			if bool(_cover_col.get("disabled", false)):
+				_tac_state = 0
+				_has_cover = false
+				_cover_col = {}
+				return
+			if _tac_t < 0.6 and not _los_ok and _seen_age > 3.0 and _last_seen != Vector3.ZERO:
+				# 探头却看不到人：目标已脱离——放弃掩体循环，转搜索
+				_tac_state = 5
+				_tac_t = 9.0
+				_has_cover = false
+				_cover_col = {}
+				return
+			_tac_t -= dt
+			if _tac_t <= 0.0:
+				if dist < 7.0 or (hp * 3 >= max_hp and randf() < 0.45):
+					_tac_state = 0
+					_has_cover = false
+					_cover_col = {}
+					_decide_t = randf_range(3.0, 6.0)
+				else:
+					_tac_state = 1
+					_tac_t = 3.0
+		5: # 搜索：向最后目击点移动，重见玩家立刻转交战
+			_suppress_fire = true
+			if _los_ok:
+				_tac_state = 0
+				return
+			var rem5 := _tac_move(_last_seen, _tac_speed() + 0.4, dt)
+			_tac_t -= dt
+			if rem5 < 1.2 or _tac_t <= 0.0:
+				_tac_state = 6
+				_tac_t = 8.0
+		6: # 归营：回出生点附近待命（不许全图乱跑）
+			_suppress_fire = true
+			if _los_ok:
+				_tac_state = 0
+				return
+			var rem6 := _tac_move(_home, _tac_speed(), dt)
+			_tac_t -= dt
+			if rem6 < 1.5 or _tac_t <= 0.0:
+				_tac_state = 0
+				_seen_age = 0.0
+				_last_seen = Vector3.ZERO
 
 func destroy_enemy() -> void:
 	queue_free()

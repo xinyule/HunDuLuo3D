@@ -55,7 +55,11 @@ func _on_frame() -> void:
 			if _frame == 3:
 				_main._set_lives("inf")
 				_main.start_game()
-				_main._load_level(2)
+				_phase = "load"
+		"load":
+			# 1.2.0 探针适配（dialog 门控，同 long_routes 口径）：旧版在 boot 里同步调
+			# _load_level+读 player，异步协程下 player 为 Nil 报错且 boot 分支中断、永久卡死。
+			if _main.state == "dialog" and _main.level_index == 2 and is_instance_valid(_main.player):
 				_main._advance_dialog()
 				_level = _main.current_level
 				_player = _main.player
@@ -65,6 +69,8 @@ func _on_frame() -> void:
 				_set_stage("enter")
 				_phase = "run"
 				_wait = 3
+			elif _main.state != "loading" and _main.level_index != 2:
+				_main._load_level(2)
 		"run":
 			if _wait > 0:
 				_wait -= 1

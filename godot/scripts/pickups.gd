@@ -11,7 +11,7 @@ class FalconTarget:
 	var hit_x := 0.0
 	var hit_y := 0.0
 	var hit_z := 0.0
-	var hit_r := 0.95
+	var hit_r := 1.52 # 1.2.0：飞鹰体型 ×1.6，命中半径同步（原 0.95）
 	var owner: PickupSystem
 	func on_hit(_dmg: int, _point: Vector3 = Vector3.ZERO) -> void:
 		if owner:
@@ -107,6 +107,7 @@ func spawn_falcon(z: float, letter: String, half_width: float) -> void:
 		wings.append(pivot)
 		mids.append(mid)
 	add_child(g)
+	g.scale = Vector3.ONE * 1.6 # 1.2.0：飞鹰整体放大 1.6 倍（用户反馈太小太难打）；巡逻高度/速度在 update 里独立赋值，不受影响
 	var target := FalconTarget.new()
 	target.owner = self
 	g.position = Vector3(-half_width - 7.0, 8.0, z)
@@ -154,6 +155,7 @@ func _make_letter(pos: Vector3, letter: String, floor_y: float) -> void:
 		Util.box(g, Vector3(0.13, 0.4, 0.1), white, Vector3(0, 0, 0.3))
 	else:
 		var label := Label3D.new()
+		label.font = preload("res://assets/font/noto_sc_full.otf") # 显式打包字体，不依赖系统回退
 		label.text = letter
 		label.font_size = 128
 		label.pixel_size = 0.006
@@ -219,6 +221,7 @@ func _collect_emblem(i: int) -> void:
 	_ctx["on_score"].call(300)
 	AudioSys.play("pickup", -2.0)
 	var lab := Label3D.new()
+	lab.font = preload("res://assets/font/noto_sc_full.otf") # 显式打包字体，不依赖系统回退（此标签含中文）
 	lab.text = "隐藏鹰徽 %d/3" % emblem_total(lv)
 	lab.font_size = 110
 	lab.pixel_size = 0.008

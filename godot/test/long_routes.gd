@@ -18,6 +18,8 @@ var _job: Dictionary = {}
 var _phase := "boot"
 var _wait := 0
 var _job_frames := 0
+var _setup_frames := 0 # setup 门控看门狗：防门控死锁静默空转
+var _from_job := 0 # 断点续跑起点（命令行 --from-job N）
 
 var _level = null
 var _player = null
@@ -39,6 +41,8 @@ var _gate_i := 0
 var _gs := ""
 var _gs_frames := 0
 var _gate_z := 0.0
+var _lock_ref: Dictionary = {} # 1.2.0：当前正在处理的封锁区
+var _lock_steps := 0 # 1.2.0：封锁穿行中的绕障横移计数（与路线 _sidesteps 分开）
 var _gates_blocked := 0
 # Boss
 var _boss_seen := false
@@ -64,6 +68,10 @@ func _check(cond: bool, label: String) -> void:
 		print("  FAIL - ", label)
 
 func _initialize() -> void:
+	Engine.time_scale = 3.0 # 探针专用加速：本机算力下全关实走帧数过大；断言均为位置/状态型，不受倍率影响
+	for a in OS.get_cmdline_user_args():
+		if a.begins_with("--from-job="):
+			_from_job = int(a.trim_prefix("--from-job="))
 	var ps: PackedScene = load("res://main.tscn")
 	_main = ps.instantiate()
 	root.add_child(_main)
@@ -106,14 +114,21 @@ func _next_job() -> void:
 		print("LONG ROUTES RESULT: %d passed, %d failed" % [_pass, _fail])
 		quit(1 if _fail > 0 else 0)
 		return
+	if _job_i < _from_job:
+		_next_job() # 断点续跑：跳过已验作业（-- --from-job N）
+		return
 	_job = _jobs[_job_i]
 	_lv = int(_job["lv"])
 	_phase = "setup"
 	_wait = 0
 	_job_frames = 0
+	_setup_frames = 0
 
 func _setup_job() -> void:
-	_main._load_level(_lv)
+	# 1.2.0 探针适配（同 1.1.0 其余探针的 dialog 门控）：_load_level 已由 _on_frame 的
+	# setup 门控发起并等到 state=dialog 才进本函数，此处只推进剧情拿 playing 态。
+	# 旧版在此无条件调 _load_level：加载中重试会在协程完成当帧把已建好的关卡重启，
+	# _free_run 随即销毁探针正引用的 player/level，run 阶段全程操作已释放对象直至超时。
 	_main._advance_dialog()
 	_level = _main.current_level
 	_player = _main.player
@@ -169,7 +184,18 @@ func _on_frame() -> void:
 				_next_job()
 			return
 		"setup":
-			_setup_job()
+			_setup_frames += 1
+			if _setup_frames > 4000:
+				_check(false, "L%d %s setup 门控超时（加载未落地）" % [_lv + 1, String(_job["kind"])])
+				_next_job()
+				return
+			# dialog 门控：目标关加载完成（state=dialog 且 level_index 对版、player 有效）才 setup；
+			# 非加载态一律发起（同关连跑也要重载出干净关卡态）；加载中只等，不重复调 _load_level。
+			# 注：旧条件带 level_index!=_lv，同关第二个作业会因 idx 相同永不触发加载而死锁，已修。
+			if _main.state == "dialog" and _main.level_index == _lv and is_instance_valid(_main.player):
+				_setup_job()
+			elif _main.state != "loading":
+				_main._load_level(_lv)
 			return
 		"run":
 			if _wait > 0:
@@ -234,6 +260,30 @@ func _run_lane() -> void:
 			_last_dist = dist
 			_stall = 0
 		return
+	if _gs == "lockclear":
+		# 1.2.0 封锁点：成员已清，等墙落下后穿过墙线恢复正常行走
+		# 墙前/墙线常有营地建筑、残骸挡道（卡点未必是墙本身），沿用正常行走的横移绕障
+		_steer(_lane_tx, float(_lock_ref["z"]) - 30.0)
+		Input.action_press("move_forward")
+		_gs_frames += 1
+		if p.z < float(_lock_ref["z"]) - 2.0:
+			_gs = ""
+			_last_dist = dist
+			_stall = 0
+		elif _gs_frames > 2400:
+			_check(false, "L%d lane %.0f 封锁清场后墙未落下" % [_lv + 1, _lane_tx])
+			_end_lane()
+		else:
+			if dist - _last_dist < 0.02:
+				_stall += 1
+			else:
+				_stall = 0
+				_last_dist = dist
+			if _stall > 40:
+				_stall = 0
+				_lock_steps += 1
+				_lane_tx = clampf(_lane_tx + (6.0 if _lock_steps % 2 == 1 else -12.0), -(_level.width / 2.0 - 16.0), _level.width / 2.0 - 16.0)
+		return
 	# 正常行走
 	_steer(_lane_tx, p.z - 40.0)
 	Input.action_press("move_forward")
@@ -244,6 +294,22 @@ func _run_lane() -> void:
 		_last_dist = dist
 	if _stall > 40:
 		_stall = 0
+		# 1.2.0：前方是否有活跃封锁墙（先于电网门判定）——清掉区内成员等墙落
+		var blocked_by_lock := false
+		for lk in _level.locks:
+			if bool(lk["active"]) and p.z > float(lk["z"]) and p.z - float(lk["z"]) < 6.0:
+				blocked_by_lock = true
+				_lock_ref = lk
+				break
+		if blocked_by_lock:
+			_check(p.z > float(_lock_ref["z"]) + 0.4, "L%d lane %.0f 封锁墙正撞拦停 (z=%.2f wall_z=%.2f)" % [_lv + 1, _lane_tx, p.z, float(_lock_ref["z"])])
+			for e in _lock_ref["members"]:
+				if is_instance_valid(e) and e.alive:
+					e.on_hit(99999)
+			_gs = "lockclear"
+			_gs_frames = 0
+			_lock_steps = 0
+			return
 		# 前方是否有未开的门
 		var blocked_by_gate := false
 		if _gate_i < _level.gates.size():

@@ -36,6 +36,8 @@ var _total_hp := 1
 var _total_max := 1
 var _mats: Array = []
 var _anim_nodes: Dictionary = {}
+var _reinf_timer := 6.0 # 最终 Boss 增援首波延迟（1.2.0）
+var _reinforcements: Array = []
 
 func setup(p_id: String, pos: Vector3, ctx: Dictionary) -> void:
 	boss_id = p_id
@@ -540,7 +542,7 @@ func _build_alien_heart() -> void:
 	_sphs(heart, 0.34, hm, Vector3(0.7, 0.5, 1.0), Vector3(1, 1, 1), 10, 8)
 	_sphs(heart, 0.28, hm, Vector3(-0.85, 0.78, 0.72), Vector3(1, 1, 1), 10, 8)
 	_sphs(heart, 0.3, hm, Vector3(0.12, -0.95, 1.02), Vector3(1, 1, 1), 10, 8)
-	var heart_p := _add_part("heart", 1870, heart, 1.8, true) # 对标原版公式 55 发（调平表 §5）
+	var heart_p := _add_part("heart", 4500, heart, 1.8, true) # 1.2.0：1870→4500 大幅加难（用户「太太太简单了」；可通关实证见 boss120 探针）
 	heart_p.vulnerable = false
 	_anim_nodes["heart"] = heart
 	_anim_nodes["heart_part"] = heart_p
@@ -757,13 +759,41 @@ func update_boss(dt: float, player) -> void:
 		"alienHeart":
 			var dragon_alive: bool = _anim_nodes["dragon_part"].alive
 			if _fire_timer <= 0.0:
-				_fire_timer = 1.7 if dragon_alive else 1.1
+				_fire_timer = 1.35 if dragon_alive else 0.85 # 1.2.0：本体开火频率 +~30%（原 1.7/1.1）
 				_orb_at(global_position + Vector3(-3.1, 4.6, 1.5), player, 18.0, 0.25)
 				if not dragon_alive:
 					_orb_at(_anim_nodes["heart"].global_position, player, 19.0, 0.2)
 			if _special_timer <= 0.0:
 				_special_timer = 8.0
 				_ctx["spawn_minion"].call("spore", global_position.x + randf_range(-5, 5), global_position.z + 8.0)
+			# 1.2.0 增援波：每 12 秒随机杂兵从竞技场边缘涌入（存活上限 6，见 _spawn_reinforcements）
+			_reinf_timer -= dt
+			if _reinf_timer <= 0.0:
+				_reinf_timer = 12.0
+				_spawn_reinforcements(player)
+
+## 最终 Boss 增援（1.2.0）：随机杂兵从竞技场两侧边缘多点涌入——持续压力，但存活上限封顶不淹人
+const REINF_TYPES := ["rifleman", "runner", "shield", "bomber"]
+const REINF_CAP := 6
+
+func _spawn_reinforcements(player) -> void:
+	for i in range(_reinforcements.size() - 1, -1, -1):
+		var e = _reinforcements[i]
+		if not is_instance_valid(e) or not e.alive:
+			_reinforcements.remove_at(i)
+	var room := REINF_CAP - _reinforcements.size()
+	if room <= 0:
+		return
+	var n := mini(randi_range(2, 3), room)
+	for k in n:
+		var side := 1.0 if randf() > 0.5 else -1.0
+		var x := global_position.x + side * randf_range(18.0, 38.0)
+		var z := global_position.z + randf_range(9.0, 24.0)
+		if player != null and Vector2(x - player.global_position.x, z - player.global_position.z).length() < 10.0:
+			x = global_position.x - side * randf_range(18.0, 38.0) # 刷点离玩家太近就换另一侧
+		var e2 = _ctx["spawn_minion"].call(REINF_TYPES[randi() % REINF_TYPES.size()], x, z)
+		if e2 != null:
+			_reinforcements.append(e2)
 
 func _orb_at(from: Vector3, player, speed: float, inacc: float, spread_x: float = 0.0) -> void:
 	var target := Vector3(
