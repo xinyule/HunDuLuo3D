@@ -1,0 +1,152 @@
+name: Build HunDuLuo3D
+
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: "构建平台"
+        required: true
+        type: choice
+        options:
+          - win
+          - android
+          - web
+          - all
+        default: win
+
+env:
+  GODOT_VERSION: "4.3"
+  GODOT_BIN: Godot_v4.3-stable_linux.x86_64
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java 17 (Android only)
+        if: inputs.platform == 'android' || inputs.platform == 'all'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install Android platform 34 + build-tools (Android only)
+        if: inputs.platform == 'android' || inputs.platform == 'all'
+        run: |
+          SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          echo "SDK=$SDK"
+          yes | "$SDK/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
+          "$SDK/cmdline-tools/latest/bin/sdkmanager" "platforms;android-34" "build-tools;34.0.0"
+
+      - name: Download Godot 4.3 + export templates
+        run: |
+          mkdir -p "$HOME/godot-bin" "$HOME/.local/share/godot/export_templates/4.3.stable"
+          cd /tmp
+          wget -q "https://github.com/godotengine/godot/releases/download/4.3-stable/${GODOT_BIN}.zip"
+          wget -q "https://github.com/godotengine/godot/releases/download/4.3-stable/Godot_v4.3-stable_export_templates.tpz"
+          unzip -q "${GODOT_BIN}.zip" -d "$HOME/godot-bin"
+          mkdir -p /tmp/tpz && unzip -q "Godot_v4.3-stable_export_templates.tpz" -d /tmp/tpz
+          cp -r /tmp/tpz/templates/* "$HOME/.local/share/godot/export_templates/4.3.stable/"
+          ln -sf "$HOME/godot-bin/${GODOT_BIN}" "$HOME/godot-bin/godot"
+          echo "$HOME/godot-bin" >> "$GITHUB_PATH"
+          "$HOME/godot-bin/godot" --version
+
+      - name: Configure Android SDK path in Godot editor settings (Android only)
+        if: inputs.platform == 'android' || inputs.platform == 'all'
+        run: |
+          SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          godot --headless --editor --quit --path godot || true
+          python3 - "$SDK" <<'PYEOF'
+          import re, sys, os
+          sdk = sys.argv[1]
+          p = os.path.expanduser("~/.config/godot/editor_settings-4.3.tres")
+          txt = open(p, encoding="utf-8").read() if os.path.exists(p) else ""
+          line = 'export/android/android_sdk_path = "%s"' % sdk
+          if "export/android/android_sdk_path" in txt:
+              txt = re.sub(r'export/android/android_sdk_path = ".*"', line, txt)
+          else:
+              txt = txt.rstrip("\n") + "\n" + line + "\n"
+          os.makedirs(os.path.dirname(p), exist_ok=True)
+          open(p, "w", encoding="utf-8").write(txt)
+          print("editor settings: android_sdk_path set (file exists:", os.path.exists(p), ")")
+          PYEOF
+
+      - name: Import project resources
+        run: godot --headless --path godot --import
+
+      - name: Prepare Android signing on runner (Android only)
+        if: inputs.platform == 'android' || inputs.platform == 'all'
+        env:
+          KS_B64: ${{ secrets.HUNDUOLUO_KEYSTORE_BASE64 }}
+          KS_PASS: ${{ secrets.HUNDUOLUO_KEYSTORE_PASSWORD }}
+          KS_PATH: ${{ runner.temp }}/hunduoluo.keystore
+        run: |
+          echo "$KS_B64" | base64 -d > "$KS_PATH"
+          python3 <<'PYEOF'
+          import os
+          p = "godot/export_presets.cfg"
+          txt = open(p, encoding="utf-8").read()
+          # 与本地 1.0.0 发版一致：仓库预设遗留 version/name="3.0"，仅在 runner 副本上改为 1.0.0
+          assert 'version/name="3.0"' in txt
+          txt = txt.replace('version/name="3.0"', 'version/name="1.0.0"')
+          ks_lines = (
+              'keystore/debug=""\n'
+              'keystore/debug_user=""\n'
+              'keystore/debug_password=""\n'
+              'keystore/release="%s"\n'
+              'keystore/release_user="hunduoluo"\n'
+              'keystore/release_password="%s"\n'
+          ) % (os.environ["KS_PATH"], os.environ["KS_PASS"])
+          anchor = "[preset.2.options]\n"
+          assert anchor in txt
+          txt = txt.replace(anchor, anchor + "\n" + ks_lines, 1)
+          open(p, "w", encoding="utf-8").write(txt)
+          print("android preset prepared on runner (keystore lines injected, version/name=1.0.0)")
+          PYEOF
+
+      - name: Export Windows
+        if: inputs.platform == 'win' || inputs.platform == 'all'
+        run: |
+          mkdir -p build/windows
+          godot --headless --path godot --export-release "Windows Desktop" "$GITHUB_WORKSPACE/build/windows/HunDuLuo3D.exe"
+          ls -la build/windows
+
+      - name: Upload Windows artifact
+        if: inputs.platform == 'win' || inputs.platform == 'all'
+        uses: actions/upload-artifact@v4
+        with:
+          name: hunduoluo3d-windows
+          path: build/windows/*
+          if-no-files-found: error
+
+      - name: Export Android
+        if: inputs.platform == 'android' || inputs.platform == 'all'
+        run: |
+          mkdir -p build/android
+          godot --headless --path godot --export-release "Android" "$GITHUB_WORKSPACE/build/android/HunDuLuo3D.apk"
+          ls -la build/android
+
+      - name: Upload Android artifact
+        if: inputs.platform == 'android' || inputs.platform == 'all'
+        uses: actions/upload-artifact@v4
+        with:
+          name: hunduoluo3d-android
+          path: build/android/*
+          if-no-files-found: error
+
+      - name: Export Web
+        if: inputs.platform == 'web' || inputs.platform == 'all'
+        run: |
+          mkdir -p build/web
+          godot --headless --path godot --export-release "Web" "$GITHUB_WORKSPACE/build/web/index.html"
+          ls -la build/web
+
+      - name: Upload Web artifact
+        if: inputs.platform == 'web' || inputs.platform == 'all'
+        uses: actions/upload-artifact@v4
+        with:
+          name: hunduoluo3d-web
+          path: build/web/*
+          if-no-files-found: error
