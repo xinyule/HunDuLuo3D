@@ -1,7 +1,7 @@
 extends Node3D
 
 ## 主引擎 —— 状态机是唯一有权改 state 的地方
-## 状态：menu / dialog / playing / levelclear / gameover / victory
+## 状态：menu / loading / dialog / playing / levelclear / gameover / victory
 ## 输入动作运行时注册；UI 全部代码构建（军事玻璃风）
 
 var state := "menu"
@@ -91,6 +91,23 @@ var _ui_pool: Array[AudioStreamPlayer] = []
 var _ui_streams: Dictionary = {}
 var _ui_idx := 0
 var _cross: TextureRect
+# 加载界面 + 点击引导（1.1.0 体验项：加载过程要让玩家看见、进关点击要有引导）
+var load_layer: Control
+var _load_title: Label
+var _load_stage_lbl: Label
+var _load_fill: ColorRect
+var _load_pct: Label
+var _load_tip: Label
+var _loading := false # 关卡分阶段生成进行中（防重入）
+var _load_frame_shown := -1 # 加载界面上屏帧号（探针时序实证用）
+var _load_frame_gen_start := -1 # 生成开始帧号
+var _load_frame_gen_end := -1 # 生成结束帧号
+var _click_hint: Control
+var _hint_label: Label
+var _hint_active := false
+var _hint_alpha := 0.0
+var _hint_pulse := 0.0
+var _hint_ever_captured := false
 # 通关评级：本关计时与起始分（_load_level 时重置；续关重开本关同样重置，与既有续关语义一致）
 var _level_time := 0.0
 var _level_start_score := 0
@@ -360,6 +377,40 @@ func _make_crosshair_texture() -> Texture2D:
 					img.set_pixel(x, y, Color(0, 0, 0, 0.55))
 	return ImageTexture.create_from_image(img)
 
+## 鼠标图标贴图（程序绘制）：圆角矩形轮廓 + 滚轮 + 左右键分界，白色配深色描边（与准星同法）
+func _make_mouse_texture() -> Texture2D:
+	var w := 36
+	var h := 48
+	var img := Image.create(w, h, false, Image.FORMAT_RGBA8)
+	img.fill(Color(0, 0, 0, 0))
+	var shape := {}
+	var c := Vector2(17.5, 23.5)
+	for y in h:
+		for x in w:
+			var p := Vector2(x, y)
+			var q := Vector2(absf(p.x - c.x), absf(p.y - c.y)) - Vector2(9.0, 15.0)
+			var d := Vector2(maxf(q.x, 0.0), maxf(q.y, 0.0)).length() + minf(maxf(q.x, q.y), 0.0) - 8.0
+			var inside := d <= 0.0 and d > -2.6 # 轮廓线
+			if not inside and absf(p.x - c.x) <= 1.1 and p.y >= 10.0 and p.y <= 19.0:
+				inside = true # 滚轮
+			if not inside and d <= 0.0 and p.y >= 15.5 and p.y <= 17.5 and absf(p.x - c.x) <= 12.0:
+				inside = true # 左右键分界线
+			if inside:
+				shape[Vector2i(x, y)] = true
+	for y in h:
+		for x in w:
+			if shape.has(Vector2i(x, y)):
+				img.set_pixel(x, y, Color(1, 1, 1, 1))
+			else:
+				var near := false
+				for o in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
+					if shape.has(Vector2i(x, y) + o):
+						near = true
+						break
+				if near:
+					img.set_pixel(x, y, Color(0, 0, 0, 0.55))
+	return ImageTexture.create_from_image(img)
+
 func _toggle_btn(text: String, group: Dictionary, key) -> Button:
 	var b := Button.new()
 	b.text = text
@@ -532,6 +583,7 @@ func _build_ui() -> void:
 	_build_hud()
 	_build_end_panels()
 	_build_touch()
+	_build_loading_ui() # 最后建：绘制顺序在最上层，生成时盖住一切
 	_refresh_toggles()
 
 func _wrap_center(p: Control) -> void:
@@ -675,7 +727,138 @@ func _build_hud() -> void:
 		fl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		_float_layer.add_child(fl)
 		_floats.append({"label": fl, "pos": Vector3.ZERO, "t": 99.0})
+	# 点击引导（1.1.0 体验项）：位于画面中央下方，不挡准星；显隐/脉冲/淡出由 _update_click_hint 每帧驱动。
+	# 半透明暗底垫在背面：沙地等亮背景上文字/图标可读（实测无底时金色字贴亮沙地几乎看不清）；
+	# 底板与内容同属一个 Control 容器，便于 modulate 统一淡入淡出。
+	_click_hint = Control.new()
+	_click_hint.set_anchors_preset(Control.PRESET_CENTER)
+	_click_hint.position = Vector2(-190, 150)
+	_click_hint.custom_minimum_size = Vector2(380, 52)
+	_click_hint.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	hud.add_child(_click_hint)
+	var hbg := Panel.new()
+	var hsb := StyleBoxFlat.new()
+	hsb.bg_color = Color(0, 0, 0, 0.45)
+	hsb.set_corner_radius_all(10)
+	hsb.content_margin_left = 12
+	hsb.content_margin_right = 12
+	hsb.content_margin_top = 6
+	hsb.content_margin_bottom = 6
+	hbg.add_theme_stylebox_override("panel", hsb)
+	hbg.set_anchors_preset(Control.PRESET_FULL_RECT)
+	hbg.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_click_hint.add_child(hbg)
+	var hrow := HBoxContainer.new()
+	hrow.set_anchors_preset(Control.PRESET_FULL_RECT)
+	hrow.alignment = BoxContainer.ALIGNMENT_CENTER
+	hrow.add_theme_constant_override("separation", 10)
+	hrow.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_click_hint.add_child(hrow)
+	var mic := TextureRect.new()
+	mic.texture = _make_mouse_texture()
+	mic.custom_minimum_size = Vector2(30, 40)
+	mic.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	mic.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	mic.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	mic.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	hrow.add_child(mic)
+	var htxt := VBoxContainer.new()
+	htxt.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	hrow.add_child(htxt)
+	_hint_label = _label("点击画面开始战斗", 20, Color(1, 0.85, 0.35))
+	htxt.add_child(_hint_label)
+	htxt.add_child(_label("点击后锁定鼠标视角 · Esc 可释放", 13, Color(0.75, 0.78, 0.74)))
+	_click_hint.visible = false
+	_click_hint.modulate.a = 0.0
 	hud.visible = false
+
+## 加载界面（1.1.0 体验项）：全屏盖住一切，生成期间显示关名/阶段/进度/小贴士；
+## 鼠标过滤 STOP——生成中挡住下层所有点击，防重复开局
+func _build_loading_ui() -> void:
+	load_layer = Control.new()
+	load_layer.set_anchors_preset(Control.PRESET_FULL_RECT)
+	load_layer.mouse_filter = Control.MOUSE_FILTER_STOP
+	ui.add_child(load_layer)
+	var bg := ColorRect.new()
+	bg.color = Color(0.02, 0.03, 0.025, 0.97)
+	bg.set_anchors_preset(Control.PRESET_FULL_RECT)
+	bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	load_layer.add_child(bg)
+	var cc := CenterContainer.new()
+	cc.set_anchors_preset(Control.PRESET_FULL_RECT)
+	cc.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	load_layer.add_child(cc)
+	var vb := VBoxContainer.new()
+	vb.add_theme_constant_override("separation", 14)
+	vb.alignment = BoxContainer.ALIGNMENT_CENTER
+	cc.add_child(vb)
+	_load_title = _label("", 30, Color(1, 0.78, 0.3))
+	_load_title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	vb.add_child(_load_title)
+	_load_stage_lbl = _label("", 17, Color(0.9, 0.92, 0.88))
+	_load_stage_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	vb.add_child(_load_stage_lbl)
+	var bar_row := CenterContainer.new()
+	bar_row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	vb.add_child(bar_row)
+	var bar_bg := ColorRect.new()
+	bar_bg.color = Color(0, 0, 0, 0.6)
+	bar_bg.custom_minimum_size = Vector2(440, 12)
+	bar_bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	bar_row.add_child(bar_bg)
+	_load_fill = ColorRect.new()
+	_load_fill.color = Color(1, 0.62, 0.15)
+	_load_fill.size = Vector2(2, 12) # 宽度只写 size（设 minimum 会被钳住，同 Boss 血条教训）
+	_load_fill.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	bar_bg.add_child(_load_fill)
+	_load_pct = _label("0%", 13, Color(0.7, 0.74, 0.7))
+	_load_pct.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	vb.add_child(_load_pct)
+	_load_tip = _label("", 13, Color(0.55, 0.6, 0.55))
+	_load_tip.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	vb.add_child(_load_tip)
+	load_layer.visible = false
+
+const LOAD_TIPS := [
+	"提示：右键瞄准可收紧镜头，点射更准",
+	"提示：C 键趴下可以躲开高处射来的子弹",
+	"提示：打下飞鹰掉落的武器胶囊可以更换武器",
+	"提示：油桶可以打爆，爆炸能清掉一小片敌人",
+	"提示：Shift 疾跑赶路，接近敌人时记得放慢脚步",
+]
+
+func _show_loading(idx: int) -> void:
+	var data: Dictionary = Data.LEVELS[idx]
+	_load_title.text = String(data["name"])
+	_load_stage_lbl.text = "正在准备…"
+	_load_tip.text = LOAD_TIPS[idx % LOAD_TIPS.size()]
+	_set_load_progress(0.0)
+	load_layer.visible = true
+
+func _set_load_progress(f: float) -> void:
+	var cf := clampf(f, 0.0, 1.0)
+	_load_fill.size = Vector2(maxf(2.0, 440.0 * cf), 12)
+	_load_pct.text = "%d%%" % int(round(cf * 100.0))
+
+## 点击引导显隐（每帧在主循环顶部统一更新）：仅游玩中、非触屏、指针未锁定时需要；
+## 锁定成功后淡出消失；Esc 释放后重显且文案改「继续」；任何状态切换都会自动淡出不残留。
+func _update_click_hint(dt: float) -> void:
+	var want := false
+	if state == "playing" and not DisplayServer.is_touchscreen_available():
+		if Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
+			_hint_ever_captured = true
+		else:
+			want = true
+	if want and not _hint_active:
+		_hint_label.text = "点击画面继续战斗" if _hint_ever_captured else "点击画面开始战斗"
+	_hint_active = want
+	_hint_alpha = clampf(_hint_alpha + (dt * 4.0 if want else -dt * 4.0), 0.0, 1.0)
+	var a := _hint_alpha
+	if want:
+		_hint_pulse += dt
+		a *= 0.78 + 0.22 * sin(_hint_pulse * 4.2)
+	_click_hint.visible = _hint_alpha > 0.02
+	_click_hint.modulate.a = a
 
 func _build_end_panels() -> void:
 	# 失败
@@ -946,10 +1129,23 @@ func _start_from_level(i: int) -> void:
 	AudioSys.play("pickup")
 	start_game(i)
 
+## 进关（全平台统一入口：开始/选关/续关/重开/通关下一关都走这里）。
+## 1.1.0 体验项：生成改为分阶段协程——先亮加载界面并等它真正画出来，再逐阶段生成、
+## 每阶段先刷文案/进度再执行；玩家不会再对着冻结画面以为卡死。生成中 state="loading"。
 func _load_level(idx: int) -> void:
+	if _loading:
+		return # 生成进行中：重复入口（连点按钮等）直接忽略，防两份关卡叠建
+	_loading = true
+	state = "loading"
 	level_index = idx
 	_level_time = 0.0
 	_level_start_score = score
+	_hint_ever_captured = false
+	_show_loading(idx)
+	_load_frame_shown = Engine.get_process_frames()
+	await get_tree().process_frame
+	await get_tree().process_frame # 两帧保险：布局一帧 + 绘制一帧，确保慢机上也先上屏再开工
+	_load_frame_gen_start = Engine.get_process_frames()
 	_free_run()
 	var data: Dictionary = Data.LEVELS[idx]
 	current_level = Level.new()
@@ -960,6 +1156,7 @@ func _load_level(idx: int) -> void:
 		"soldier_scenes": soldier_scenes,
 		"difficulty": difficulty,
 		"quality": quality,
+		"staged": true, # 只备阶段不执行，下面逐帧驱动（加载进度的数据源）
 		"on_score": _add_score,
 		"on_kill": _on_kill,
 		"on_encounter": _on_encounter,
@@ -969,6 +1166,15 @@ func _load_level(idx: int) -> void:
 		"on_boss_defeated": _on_boss_defeated,
 		"on_core_exposed": func(): pass, # 核心暴露靠画面本身反馈，不弹文字提示弱点
 	})
+	var total := current_level.build_stage_count()
+	while not current_level.build_done:
+		var si := current_level.build_stage_index()
+		_load_stage_lbl.text = Level.BUILD_STAGE_NAMES[si] + "…"
+		_set_load_progress(float(si) / float(total))
+		await get_tree().process_frame # 先把本阶段的文案/进度画出来，再执行该阶段
+		current_level.run_next_build_stage()
+	_load_frame_gen_end = Engine.get_process_frames()
+	_set_load_progress(1.0)
 	player = Player.new()
 	add_child(player)
 	player.setup(char_id)
@@ -986,6 +1192,8 @@ func _load_level(idx: int) -> void:
 	_set_boss_bar(false)
 	_start_ambient(String(data["theme"]))
 	_apply_bgm_theme(String(data["theme"]))
+	load_layer.visible = false # 生成完毕立即撤下加载界面，不留多余停顿
+	_loading = false
 	_show_dialog(String(data["name"]) + "\n" + String(data["story"]), func():
 		state = "playing"
 		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED)
@@ -1323,6 +1531,7 @@ func _process(dt: float) -> void:
 		Engine.time_scale = 1.0
 		_hitstop_end = 0
 	dt = minf(dt, 0.05) # 钳制帧步长：低帧率/卡顿设备上不快进（软件渲染实测教训）
+	_update_click_hint(dt) # 点击引导在所有状态下统一更新：切状态自动淡出、游玩中未锁定自动亮起
 	if state == "menu":
 		_menu_time += dt
 		if is_instance_valid(_menu_player):

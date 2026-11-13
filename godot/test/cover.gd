@@ -39,12 +39,15 @@ func _on_frame() -> void:
 		0:
 			if _frame > 30:
 				_main.start_game()
+				_phase = 9
+		9: # 1.1.0 探针适配：生成是跨帧协程，等 dialog 落地才推进剧情（原同帧 advance 是空操作）
+			if _main.state == "dialog":
 				_main._advance_dialog()
 				_main.player.barrier = 99999.0
 				_main.player.global_position = Vector3(0, 0, 20)
 				_phase = 1
+				_frame = 30 # 复用原「落稳」帧标尺（原 phase1 在 _frame>55 触发）
 		1:
-			if _frame > 55: # 等玩家落稳到地形上，枪口高度才是实战高度
 				var lv = _main.current_level
 				lv._add_crate(0.0, 14.0, 1.1, 1.1, 1.6, Util.pbr(Color(1, 1, 1), "planks", 0.9))
 				_crate_col = lv.colliders[lv.colliders.size() - 1]

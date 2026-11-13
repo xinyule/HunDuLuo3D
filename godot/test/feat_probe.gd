@@ -2,6 +2,9 @@ extends SceneTree
 
 ## 新功能批验收探针：逐项断言（难度/画质/飘分连杀/评级选关/图鉴/对象池/环境互动）
 ## 运行：godot --headless --path . --script res://test/feat_probe.gd --fixed-fps 60
+## 1.1.0 探针适配：进关生成改为跨帧协程（加载界面逐阶段驱动），原「同帧 start+advance /
+## 同帧断言」一律改为门控——_pending 等 state 落到目标态才执行阶段体；断言一条未删，
+## 「选关直达」因加载异步拆成关号（先行）+state（dialog 落地后）两段；环境音同理拆帧验。
 
 var _main: Node
 var _frame := 0
@@ -14,6 +17,8 @@ var _bt1 = null
 var _bt2 = null
 var _victim = null
 var _gx := Vector3.ZERO
+var _pending := "" # 门控目标 state（""=无等待）
+var _gate_at := 0
 
 func _check(cond: bool, label: String) -> void:
 	if cond:
@@ -33,8 +38,20 @@ func _wait(frames: int) -> void:
 	_wait_until = _frame + frames
 	_phase += 1
 
+func _gate(state_name: String) -> void:
+	_pending = state_name
+	_gate_at = _frame
+
 func _on_frame() -> void:
 	_frame += 1
+	if _pending != "":
+		if _main.state == _pending:
+			_pending = ""
+		elif _frame - _gate_at > 3000:
+			_check(false, "等 %s 超时" % _pending)
+			_pending = ""
+		else:
+			return
 	if _frame < _wait_until:
 		return
 	match _phase:
@@ -59,8 +76,11 @@ func _on_frame() -> void:
 			_main._set_quality("high")
 			_check(_main.get_viewport().msaa_3d == Viewport.MSAA_4X, "画质高: MSAA 4X")
 			_main._set_quality("low")
-			# 开局（普通难度+低画质）验证关卡侧倍率
+			# 开局（普通难度+低画质）验证关卡侧倍率：先发起，等 dialog 落地再验
 			_main.start_game()
+			_gate("dialog")
+			_wait(1)
+		1:
 			_main._advance_dialog()
 			_check(is_equal_approx(_main.current_level._enemy_dt_scale, 1.0), "关卡难度 dt 倍率 1.0")
 			_check(is_equal_approx(_main.current_level._grass_scale, 0.45), "画质低: 草量倍率 0.45")
@@ -70,7 +90,7 @@ func _on_frame() -> void:
 			_main.player.barrier = 9999.0
 			_main.player.global_position = Vector3(0, 0, 26.0 - (_main.current_level.length - 5.0))
 			_wait(45)
-		1:
+		2:
 			_check(_main.current_level.boss_activated, "Boss 已激活")
 			_check(_main._boss_bar.visible, "Boss 血条显示")
 			_check(_main._lbl_boss.text == String(Data.BOSSES["defenseWall"]["name"]), "血条只报名字 (%s)" % _main._lbl_boss.text)
@@ -79,9 +99,8 @@ func _on_frame() -> void:
 			for p in _main.current_level.boss.targets:
 				if p.part_name == "turret":
 					p.on_hit(200)
-
 			_wait(6)
-		2:
+		3:
 			_check(_main._boss_fill.size.x < _w0, "血条随伤害缩短 (%.0f→%.0f)" % [_w0, _main._boss_fill.size.x])
 			# ---- 飘分 + 连杀 + 图鉴遭遇 ----
 			var lv = _main.current_level
@@ -89,7 +108,7 @@ func _on_frame() -> void:
 			var e = lv.enemies[lv.enemies.size() - 1]
 			e.on_hit(999, e.global_position + Vector3(0, 1.2, 0))
 			_wait(8)
-		3:
+		4:
 			_check(_main._combo == 1, "连杀计数 1 (实 %d)" % _main._combo)
 			var saw_float := false
 			for f in _main._floats:
@@ -98,7 +117,7 @@ func _on_frame() -> void:
 			_check(saw_float, "击杀飘分 +100 可见")
 			_check(_main.encountered.has("rifleman"), "图鉴遭遇已登记 rifleman")
 			_wait(200) # 连杀窗口 3 秒（60fps×3=180 帧）后应清零
-		4:
+		5:
 			_check(_main._combo == 0, "连杀断档清零 (实 %d)" % _main._combo)
 			# ---- 评级公式 ----
 			_main.lives_inf = false
@@ -120,16 +139,21 @@ func _on_frame() -> void:
 			for p in _main.current_level.boss.targets:
 				if p.part_name == "core":
 					p.on_hit(99999)
+			_gate("dialog") # Boss 死后主流程自动加载下一关：等其 dialog 落地再验结算
 			_wait(280)
-		5:
+		6:
 			_check(_main.cleared_levels.has(0), "通关已存档")
 			_check(_main.unlocked_max >= 1, "下一关已解锁 (unlocked=%d)" % _main.unlocked_max)
 			_check(_main.level_ratings.has(0), "评级已存档 (%s)" % String(_main.level_ratings.get(0, "")))
 			_check(_main.level_index == 1, "已进入第 2 关")
-			# ---- 选关直达 ----
+			# ---- 选关直达（异步加载：先验关号已切，state 待下一阶段 dialog 态复验）----
 			_main.show_menu()
 			_main._start_from_level(1)
-			_check(_main.level_index == 1 and _main.state == "dialog", "选关直达第 2 关")
+			_check(_main.level_index == 1, "选关直达第 2 关（关号已切）")
+			_gate("dialog")
+			_wait(1)
+		7:
+			_check(_main.state == "dialog", "选关直达第 2 关（剧情框已落）")
 			# ---- 图鉴 ----
 			_main.show_menu()
 			_main._show_codex()
@@ -151,25 +175,35 @@ func _on_frame() -> void:
 			_check(not weak, "图鉴无弱点文字")
 			# ---- 边缘箭头：转身背对推进方向时应出现，回正后应消失 ----
 			_main.start_game()
+			_gate("dialog")
+			_wait(1)
+		8:
 			_main._advance_dialog()
 			_main._yaw = 0.0 # 默认 PI 朝关卡内；转到 0 = 背对推进方向
 			_wait(30)
-		6:
+		9:
 			_check(_main._edge_arrow.visible, "背对目标时边缘箭头显示")
 			var vp := _main.get_viewport().get_visible_rect().size
 			var ap: Vector2 = _main._edge_arrow.position
 			_check(ap.x >= -4.0 and ap.x <= vp.x and ap.y >= -4.0 and ap.y <= vp.y, "箭头钳在屏幕边缘内 (%s)" % str(ap))
 			_main._yaw = PI
 			_wait(30)
-		7:
+		10:
 			_check(not _main._edge_arrow.visible, "正对目标（屏内）时箭头隐藏")
 			# ---- 环境音 ----
 			_check(_main._amb.playing, "环境音播放中")
 			_check(_main._amb.stream != null and _main._amb.stream.resource_path.ends_with("amb_jungle.wav"), "第1关环境音=丛林 (%s)" % (_main._amb.stream.resource_path if _main._amb.stream else "null"))
 			_check(_main._amb.volume_db <= -18.0, "环境音音量压在 BGM 之下 (%.0f dB)" % _main._amb.volume_db)
+			# 换流发生在协程尾段（生成前 stream 仍是上一关）：发起后等 dialog 落地再验
 			_main._load_level(4)
+			_gate("dialog")
+			_wait(1)
+		11:
 			_check(_main._amb.stream != null and _main._amb.stream.resource_path.ends_with("amb_snow.wav"), "第5关环境音=雪原")
 			_main._load_level(1)
+			_gate("dialog")
+			_wait(1)
+		12:
 			_check(_main._amb.stream != null and _main._amb.stream.resource_path.ends_with("amb_base.wav"), "第2关环境音=基地")
 			# ---- 弹丸对象池：三轮齐射后子节点数应恒定（复用而非新建） ----
 			var ps = _main.projectiles
@@ -196,15 +230,18 @@ func _on_frame() -> void:
 			_bt2.hit_z = _bt2.pos.z
 			blv._spawn_enemy("rifleman", _bt1.pos.x + 2.5, _bt1.pos.z)
 			_victim = blv.enemies[blv.enemies.size() - 1]
-			_main._advance_dialog()
+			_main._advance_dialog() # 已在 dialog 态：推进到 playing 才让油桶计时走
 			_bt1.on_hit(999)
 			_wait(25)
-		8:
+		13:
 			_check(not _bt1.alive and not _bt2.alive, "油桶爆炸+0.12s 连锁引爆")
 			_check(not _victim.alive, "爆炸范围杀伤敌人")
 			_check(bool(_bt1.col.get("disabled", false)), "爆后油桶碰撞失效")
 			# ---- 树冠落叶 + 草让开（回第 1 关丛林） ----
 			_main._load_level(0)
+			_gate("dialog")
+			_wait(1)
+		14:
 			_main._advance_dialog()
 			var jlv = _main.current_level
 			_check(jlv._tree_targets.size() > 0, "树冠目标已登记 (%d)" % jlv._tree_targets.size())
@@ -213,21 +250,24 @@ func _on_frame() -> void:
 			_gx = jlv._grass_base[0].origin
 			_main.player.global_position = Vector3(_gx.x, jlv.get_support_y(_gx.x, _gx.z, 999.0), _gx.z)
 			_wait(20)
-		9:
+		15:
 			var jlv2 = _main.current_level
 			_check(jlv2._grass_bent.size() > 0, "穿草草株让开 (%d 株)" % jlv2._grass_bent.size())
 			_main.player.global_position = Vector3(_gx.x + 80.0, jlv2.get_support_y(_gx.x + 80.0, _gx.z + 80.0, 999.0), _gx.z + 80.0)
 			_wait(20)
-		10:
+		16:
 			_check(_main.current_level._grass_bent.is_empty(), "离开后草株恢复")
 			# ---- 雪地脚印（第 5 关）：先等脚印跟踪器以出生点建档，再位移 ----
 			_main._load_level(4)
+			_gate("dialog")
+			_wait(1)
+		17:
 			_main._advance_dialog()
 			_wait(6)
-		11:
+		18:
 			_main.player.global_position += Vector3(2.0, 0, 0)
 			_wait(6)
-		12:
+		19:
 			_check(_main.current_level._footprints.size() >= 1, "雪地脚印留印 (%d)" % _main.current_level._footprints.size())
 			print("FEAT RESULT: %d passed, %d failed" % [_pass, _fail])
 			quit(1 if _fail > 0 else 0)

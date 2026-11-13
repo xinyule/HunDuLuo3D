@@ -32,11 +32,15 @@ func _on_frame() -> void:
 		0:
 			if _frame > 30:
 				_main.start_game()
+				_phase = 9
+		9: # 1.1.0 探针适配：生成是跨帧协程，等 dialog 落地才推进剧情（原同帧 advance 是空操作）
+			if _main.state == "dialog":
 				_main._advance_dialog()
 				_main.player.barrier = 99999.0
 				# 入口线（dist=length-8）之外：length-40 处不应触发（距 Boss 平面 56m > 38m 触发距）
 				_main.player.global_position = Vector3(0, 0, 26.0 - (_main.current_level.length - 40.0))
 				_phase = 1
+				_frame = 30 # 复用原入口线外观察时长标尺（原 phase1 在 _frame>70 触发）
 		1:
 			if _frame > 70:
 				_check(not _main.current_level.boss_activated, "入口线外 Boss 未触发")

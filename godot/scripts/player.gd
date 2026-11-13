@@ -232,8 +232,9 @@ func update_player(dt: float, snap: Dictionary, level, p_aim_yaw: float, p_aim_p
 	var wz := move.x * sin_y + -move.y * cos_y
 	var nx := global_position.x + wx * speed * dt
 	var nz := global_position.z + wz * speed * dt
-	# 开放版边界：可活动范围收到山脊内侧（山坡爬得上，硬界在脊外，由地形隆起自然围住）
-	var half_w: float = level.width / 2.0 - 14.0
+	# 开放版边界：可活动范围由关卡给出口径——室外关收到山脊内侧（山坡爬得上，硬界在脊外）；
+	# 室内关以可见侧墙内面为界（1.1.0 空气墙根因修复：旧全局公式在基地关凭空挡出 14m 死区）
+	var half_w: float = level.playable_half_width()
 	nx = clampf(nx, -half_w, half_w)
 	nz = clampf(nz, -level.length + 2.0, 30.0)
 	var resolved := _resolve_horizontal(nx, nz, level)
@@ -349,7 +350,9 @@ func _sync_visual(_dt: float, moving: bool, aiming: bool) -> void:
 			if aiming:
 				# 瞄准移动：髋朝行进方向（脚不横滑）、上身仍对准星；大角度后退用倒放近似后撤步
 				var rel := wrapf(atan2(_move_dir.x, _move_dir.y) - facing, -PI, PI)
-				hip_target = clampf(rel, -0.9, 0.9)
+				# 倾斜克制化（1.1.0 用户实测反馈「太夸张」）：偏航上限 0.9rad(51.6°)→0.105rad(6°)，
+				# 且按实际速度平滑增减（_move_speed 本身已平滑），只改幅度、不动移速/射击参数
+				hip_target = clampf(rel, -0.105, 0.105) * clampf(_move_speed / 7.5, 0.0, 1.0)
 				clip = "Walk"
 				var base := clampf(_move_speed / 2.1, 0.5, 2.4)
 				_speed_scale = -base if absf(rel) > 2.0 else base

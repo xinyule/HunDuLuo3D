@@ -20,6 +20,9 @@ func _initialize() -> void:
 
 func _on_frame() -> void:
 	_frame += 1
+	# 1.1.0 探针适配：每关生成是跨帧协程，等 dialog 落地再走原阶段（原「+5 帧」与同帧 advance 不再成立）
+	if _phase == 1 and _main.state != "dialog":
+		return
 	if _done or _frame < _wait_until:
 		return
 	match _phase:

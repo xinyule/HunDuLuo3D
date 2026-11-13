@@ -118,6 +118,7 @@ var _terr_seed := 0.0
 var _terr_river := false
 var _terr_ramp := 0.0
 var _terr_rim := 1.0
+var _relief: Array = [] # 数据驱动地形起伏（1.1.0 第二线）：[x, z, 半径, 高度] 高斯土丘（正=高地/负=低洼）
 var _falcon_queue: Array = []
 var _checkpoints: Array = []
 var _cp_index := 0
@@ -152,6 +153,7 @@ func setup(p_data: Dictionary, p_index: int, ctx: Dictionary) -> void:
 	_terr_river = bool(terr.get("river", false))
 	_terr_ramp = float(terr.get("ramp", 0.0))
 	_terr_rim = float(terr.get("rim", 1.0))
+	_relief = data.get("relief", [])
 	# 刷怪表 [dist,类型,xoff] → 世界坐标：按 dist 聚成营地，成员散布在营地周围；
 	# 每个营地登记一块地形平整垫，敌人开局就站在世界里（不再走到跟前才出现）
 	var raw: Array = []
@@ -178,7 +180,9 @@ func setup(p_data: Dictionary, p_index: int, ctx: Dictionary) -> void:
 		for k in range(i0, j0):
 			var ang := rng.randf() * TAU
 			var rad := rng.randf_range(1.5, 4.5 + float(n))
-			_spawn_points.append({"type": String(raw[k]["type"]), "x": cx + cos(ang) * rad, "z": cz + sin(ang) * rad * 0.7})
+			# 营地散布落点钳制在玩家可达范围内（1.1.0：不许有敌人站在玩家永远走不到的地方）
+			var sp_lim: float = playable_half_width() - 1.5
+			_spawn_points.append({"type": String(raw[k]["type"]), "x": clampf(cx + cos(ang) * rad, -sp_lim, sp_lim), "z": cz + sin(ang) * rad * 0.7})
 		i0 = j0
 	_pads.append({"x": 0.0, "z": 26.0, "r": 11.0, "h": 0.0}) # 出生点
 	_pads.append({"x": 0.0, "z": -length + 10.0, "r": 30.0, "h": 0.0}) # Boss 竞技场
@@ -198,7 +202,11 @@ func setup(p_data: Dictionary, p_index: int, ctx: Dictionary) -> void:
 	for gd in data.get("gates", []):
 		_checkpoints.append({"x": 0.0, "y": 0.0, "z": 26.0 - float(gd) - 4.0, "dist": float(gd) + 4.0})
 	_checkpoints.append({"x": 0.0, "y": 0.0, "z": 26.0 - (length - 44.0), "dist": length - 44.0})
-	_build()
+	_prepare_build_stages()
+	if not bool(ctx.get("staged", false)):
+		# 默认同步建完（探针/工具的旧语义不变）；ctx 带 staged 时只备阶段，由 main 逐帧驱动（加载界面）
+		while not build_done:
+			run_next_build_stage()
 
 func player_dist(player) -> float:
 	return 26.0 - player.global_position.z
@@ -248,6 +256,15 @@ func _base_height(x: float, z: float) -> float:
 	if _terr_ramp > 0.0:
 		var t := clampf((26.0 - z - 30.0) / (length - 85.0), 0.0, 1.0)
 		h += t * _terr_ramp
+	# 数据驱动起伏（1.1.0 第二线）：高斯土丘/洼地，坡度按 h/r 压在缓坡内（玩家地形跟随可步行登顶）；
+	# 营地平整垫在本函数之后抹平（terrain_h），丘顶营地自动成平顶台地、丘坡保持
+	for rf in _relief:
+		var rdx := x - float(rf[0])
+		var rdz := z - float(rf[1])
+		var rr := float(rf[2])
+		var q := (rdx * rdx + rdz * rdz) / (rr * rr)
+		if q < 4.0:
+			h += float(rf[3]) * exp(-q * 1.7)
 	if _terr_river:
 		var d := absf(z - river_center_z(x))
 		h = lerpf(-1.15, h, smoothstep(3.0, 9.5, d))
@@ -264,6 +281,16 @@ func terrain_h(x: float, z: float) -> float:
 		if d < r_out:
 			h = lerpf(float(p["h"]), h, smoothstep(float(p["r"]) * 0.65, r_out, d))
 	return h
+
+## 玩家横向可达半宽（玩家钳制、飞鹰巡逻、物品落点的共同口径，1.1.0 空气墙根因修复）：
+## 室外关沿用山脊口径（width/2-14，落在山脊内侧）；室内关 rim=0 没有山脊，
+## 以可见侧墙内面为界——基地侧墙在 ±(width/2+1.4)、厚 1.6，内面 = width/2+0.6，
+## 墙本身带碰撞兜底，钳制只作保险。旧全局公式 width/2-14 用在室内关时，
+## 会在墙前凭空挡出一条约 14m 宽的死区（人进不去、物品却能落进去）。
+func playable_half_width() -> float:
+	if _terr_rim <= 0.0:
+		return width / 2.0 + 0.6
+	return width / 2.0 - 14.0
 
 ## 坡度（梯度模长≈tan 坡角，中心差分采样 terrain_h）：植被摆放按它把关，陡坡不种
 func _slope_grad(x: float, z: float) -> float:
@@ -338,12 +365,37 @@ func _add_crate(x: float, z: float, w: float, d: float, h: float, mat: Material)
 	c["node"] = mi
 	return mi
 
-func _build() -> void:
+## 分阶段建造（1.1.0 体验项：加载过程显示）：旧 _build() 按原顺序切成 5 个阶段，
+## 阶段间可让出整帧使加载界面真实刷新；同步模式（探针）仍一口气跑完，结果与旧版一致。
+const BUILD_STAGE_NAMES := ["正在生成地形", "正在建造场景", "正在布置机关", "敌人正在集结", "正在完成部署"]
+const _BUILD_STAGE_FUNCS := ["_stage_terrain", "_stage_theme", "_stage_mechanics", "_stage_enemies", "_stage_emblems"]
+var _build_stage_idx := 0
+var build_done := false
+
+func _prepare_build_stages() -> void:
+	_build_stage_idx = 0
+	build_done = false
+
+func build_stage_count() -> int:
+	return _BUILD_STAGE_FUNCS.size()
+
+func build_stage_index() -> int:
+	return _build_stage_idx
+
+func run_next_build_stage() -> void:
+	if build_done:
+		return
+	call(String(_BUILD_STAGE_FUNCS[_build_stage_idx]))
+	_build_stage_idx += 1
+	if _build_stage_idx >= _BUILD_STAGE_FUNCS.size():
+		build_done = true
+
+func _stage_terrain() -> void:
 	var env_data: Dictionary = data["env"]
 	_setup_environment(env_data)
 	_sun = DirectionalLight3D.new()
-	_sun.light_energy = 1.05
-	_sun.light_color = Color(1, 0.97, 0.9)
+	_sun.light_energy = float(env_data.get("sun_energy", 1.05)) # 可选：逐关日光强弱（背景去重差异化，1.1.0）
+	_sun.light_color = Color.html("#%06x" % int(env_data["sun_color"])) if env_data.has("sun_color") else Color(1, 0.97, 0.9)
 	_sun.shadow_enabled = true
 	_sun.directional_shadow_mode = DirectionalLight3D.SHADOW_ORTHOGONAL
 	_sun.directional_shadow_max_distance = 120.0 if _quality == "high" else 70.0
@@ -351,6 +403,8 @@ func _build() -> void:
 	_sun.rotation_degrees = Vector3(-52, -28, 0)
 	add_child(_sun)
 	_build_ground_and_walls()
+
+func _stage_theme() -> void:
 	match String(data["theme"]):
 		"jungle": _theme_jungle()
 		"base", "base2": _theme_base()
@@ -359,6 +413,8 @@ func _build() -> void:
 		"energy": _theme_energy()
 		"hangar": _theme_hangar()
 		"alien": _theme_alien()
+
+func _stage_mechanics() -> void:
 	for gi in data.get("gates", []).size():
 		_build_gate(float(data["gates"][gi]), gi)
 	for i in data.get("flames", []).size():
@@ -367,6 +423,8 @@ func _build() -> void:
 		_build_cart(float(data["carts"][i]), i)
 	for i in data.get("crushers", []).size():
 		_build_crusher(float(data["crushers"][i]), i)
+
+func _stage_enemies() -> void:
 	boss_z = -length + 10.0
 	boss_y = get_support_y(0.0, boss_z, 999.0)
 	boss = Boss.new()
@@ -385,12 +443,14 @@ func _build() -> void:
 		_spawn_enemy(String(p["type"]), float(p["x"]), float(p["z"]))
 	for f in _falcon_queue:
 		f["done"] = true
-		pickups.spawn_falcon(26.0 - float(f["dist"]), String(f["letter"]), 44.0) # 巡逻带 ±44：避开边缘山脊
+		pickups.spawn_falcon(26.0 - float(f["dist"]), String(f["letter"]), minf(44.0, playable_half_width() - 2.0)) # 巡逻带：避开边缘山脊，且不飞出玩家可达范围（1.1.0）
+func _stage_emblems() -> void:
 	# 内容批：隐藏鹰徽（每关 3 枚）——此时主题摆件/建筑碰撞都已就位，y 取支撑面（塔顶/屋内地面都对）
 	if data.has("emblems"):
 		var es: Array = data["emblems"]
 		for ei in es.size():
-			var ex := float(es[ei][0])
+			# 鹰徽落点防御性钳制：永远摆在玩家走得到的地方（1.1.0；现行数据均在界内、位置不变）
+			var ex := clampf(float(es[ei][0]), -(playable_half_width() - 1.0), playable_half_width() - 1.0)
 			var ez := float(es[ei][1])
 			if not pickups.is_emblem_collected(level_index, ei):
 				pickups.spawn_emblem(Vector3(ex, get_support_y(ex, ez, 999.0) + 1.0, ez), level_index, ei)
@@ -478,7 +538,7 @@ func _setup_environment(env_data: Dictionary) -> void:
 		env.background_color = Color.html("#%06x" % int(env_data["bg"]))
 	else:
 		env.background_mode = Environment.BG_SKY
-		env.background_energy_multiplier = 0.85
+		env.background_energy_multiplier = float(env_data.get("sky_energy", 0.85)) # 可选：逐关天空亮度（背景去重差异化，1.1.0）
 	env.fog_enabled = true
 	env.fog_light_color = Color.html("#%06x" % int(env_data["fog"]))
 	env.fog_density = float(env_data["fog_density"])
@@ -1051,17 +1111,20 @@ func _theme_jungle() -> void:
 
 func _theme_base() -> void:
 	var rand := Util.seeded(2202 + level_index * 77)
-	var wall_mat := Util.pbr(Color(0.85, 0.88, 0.95), "metal", 0.5, 0.65, Vector2(6, 1.5))
-	var d := 0.0
+	var wall_mat := Util.pbr(Color(0.85, 0.88, 0.95), "metal", 0.5, 0.65, Vector2(6, 2.0))
+	# 侧墙带真实碰撞（1.1.0 空气墙根因修复：旧版无碰撞、全靠玩家钳制挡人，钳制线又远在墙内）；
+	# 起点前移补住出生点身后 z∈(26,42) 的墙列缺口。墙高 6.5→9.0（净高修复，见下天花板）
+	var d := -16.0
 	while d < length + 30.0:
 		for s in [-1.0, 1.0]:
-			_add_box(s * (width / 2.0 + 1.4), 26.0 - d - 7.5, 1.6, 15.0, 6.5, wall_mat, 0.0, false)
+			_add_box(s * (width / 2.0 + 1.4), 26.0 - d - 7.5, 1.6, 15.0, 9.0, wall_mat)
 		d += 15.0
 	d = 14.0
 	while d < length:
-		_add_box(0, 26.0 - d, width + 2.0, 0.8, 0.5, Util.pbr(Color(0.13, 0.15, 0.18), "", 0.6, 0.5), 6.2, false)
+		# 天花板梁板：净高 6.2→8.6（1.1.0 用户反馈房间太低；与能量关 7m 立柱+通高、仓库通高对齐量级）
+		_add_box(0, 26.0 - d, width + 2.0, 0.8, 0.5, Util.pbr(Color(0.13, 0.15, 0.18), "", 0.6, 0.5), 8.6, false)
 		var strip_m := Util.glow(Color(0.55, 0.8, 1.0), 1.8)
-		var strip := Util.box(self, Vector3(width - 2.0, 0.08, 0.3), strip_m, Vector3(0, 6.1, 26.0 - d))
+		var strip := Util.box(self, Vector3(width - 2.0, 0.08, 0.3), strip_m, Vector3(0, 8.5, 26.0 - d))
 		strip.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		_blink_mats.append({"mat": strip_m, "phase": d})
 		d += 22.0
@@ -1095,6 +1158,9 @@ func _theme_base() -> void:
 					_make_barrel(jx, jz, rand)
 		md += 13.0
 		mi += 1
+	# 夹层高点（1.1.0 第二线）：室内关没有地形起伏，用多层平台做可站人的高点（数据层 mezzanines 驱动）
+	for mz_spec in data.get("mezzanines", []):
+		_build_mezzanine(float(mz_spec[0]), float(mz_spec[1]), float(mz_spec[2]), float(mz_spec[3]), float(mz_spec[4]))
 
 func _make_barrel(x: float, z: float, _r: RandomNumberGenerator) -> void:
 	var gy := terrain_h(x, z)
@@ -1573,6 +1639,34 @@ func _build_cave() -> void:
 	lamp_head.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	pickups.spawn_heal(cx + 1.6, cz + 2.6, floor_y)
 
+## 夹层平台（1.1.0 第二线：室内基地关的高点）——钢板平台 + 四角立柱 + 实心台阶（每级 0.5m，
+## 在玩家 0.55m 支撑衔接上限内，步行可达）+ 三面栏杆（南面留台阶口）；板下净空 2.65m 可通行
+## （碰撞规则有头部净空豁免，不会把平台下走廊堵死）；平台顶直刷狙击+步枪守卫（偏置避开中心鹰徽位）
+func _build_mezzanine(mx: float, mz: float, mw: float, md: float, top: float) -> void:
+	var slab_m := Util.pbr(Color(0.34, 0.38, 0.44), "metal", 0.55, 0.6, Vector2(3, 2))
+	var dark_m := Util.pbr(Color(0.16, 0.17, 0.19), "", 0.5, 0.7)
+	_add_box(mx, mz, mw, md, 0.35, slab_m, top - 0.35)
+	for sx in [-1.0, 1.0]:
+		for sz in [-1.0, 1.0]:
+			var cx: float = mx + sx * (mw / 2.0 - 0.6)
+			var cz: float = mz + sz * (md / 2.0 - 0.6)
+			Util.cyl(self, 0.16, 0.21, top - 0.35, dark_m, Vector3(cx, (top - 0.35) / 2.0, cz), 8)
+			_add_collider({"type": "circle", "x": cx, "z": cz, "r": 0.3, "h": top - 0.35, "y0": 0.0})
+	var steps := int(round(top / 0.5))
+	for i in steps:
+		var sty := 0.5 * float(i + 1)
+		var stz := mz + md / 2.0 + float(steps - 1 - i) * 0.85 + 0.42
+		_add_box(mx, stz, 3.4, 0.85, sty, slab_m)
+	# 栏杆：北/东/西三面带碰撞（防走出平台），南面是台阶口不设
+	_add_box(mx, mz - md / 2.0 + 0.06, mw, 0.12, 0.85, dark_m, top)
+	_add_box(mx - mw / 2.0 + 0.06, mz, 0.12, md, 0.85, dark_m, top)
+	_add_box(mx + mw / 2.0 - 0.06, mz, 0.12, md, 0.85, dark_m, top)
+	# 平台口发光条（视觉提示：这里能上去）
+	var strip := Util.box(self, Vector3(3.4, 0.06, 0.18), Util.glow(Color(1, 0.8, 0.45), 1.6), Vector3(mx, top + 0.03, mz + md / 2.0 - 0.1))
+	strip.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_spawn_enemy("sniper", mx + 4.0, mz - 1.0)
+	_spawn_enemy("rifleman", mx - 4.0, mz + 1.5)
+
 ## 场景音效本地播放器（4A 合并接线，素材来自 4C 线 gen_bgm_sfx.py）：位置衰减走
 ## AudioStreamPlayer3D，不占 AudioSys 固定名单；loop=true 时给 wav 设整段循环（同 AudioSys BGM 口径）
 func _make_sfx3d(wav: String, parent_node: Node, local_pos: Vector3, loop: bool = false) -> AudioStreamPlayer3D:
@@ -1613,7 +1707,9 @@ func _build_gate(dist: float, gi: int = 0) -> void:
 	field.position = Vector3(0, 2.5, z)
 	field.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(field)
-	var collider := _add_collider({"type": "box", "x": 0.0, "z": z, "w": width - 3.4, "d": 0.9, "h": 5.2, "y0": 0.0})
+	# 电场碰撞必须盖到侧墙：玩家可达半宽放宽后（1.1.0），旧宽 width-3.4 会在门柱(±47)与墙面(±48.6)
+	# 之间留出可逐帧挤过的 0.6m 缝——绕门红线，碰撞宽改到 width+3.2 与门柱/墙体搭接
+	var collider := _add_collider({"type": "box", "x": 0.0, "z": z, "w": width + 3.2, "d": 0.9, "h": 5.2, "y0": 0.0})
 	var sensor := GateSensor.new()
 	sensor.pos = Vector3(sensor_x, 3.1, z)
 	sensor.hit_x = sensor_x

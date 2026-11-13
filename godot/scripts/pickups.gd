@@ -18,6 +18,7 @@ class FalconTarget:
 			owner._falcon_hit(self)
 
 var _ctx: Dictionary
+var _level_ref = null # update_pickups 每帧传入的关卡引用（掉信落点可达性钳制用，1.1.0）
 var _falcons: Array = []
 var _letters: Array = []
 var _emblems: Array = []
@@ -123,6 +124,11 @@ func _falcon_hit(target: FalconTarget) -> void:
 		if f["target"] == target:
 			target.alive = false
 			var gp: Vector3 = f["group"].global_position
+			# 掉信落点可达性钳制（1.1.0）：飞鹰绕回 overshoot 段（巡逻带外沿 ~9m）被打下时，
+			# 字母不许落进玩家走不到的区域——落点 x 钳进可达半宽内侧 1m
+			if _level_ref != null:
+				var lim: float = _level_ref.playable_half_width() - 1.0
+				gp.x = clampf(gp.x, -lim, lim)
 			_ctx["on_score"].call(100)
 			spawn_letter(gp.x, gp.y, gp.z, f["letter"])
 			f["group"].queue_free()
@@ -227,6 +233,7 @@ func _collect_emblem(i: int) -> void:
 	_emblems.remove_at(i)
 
 func update_pickups(dt: float, player, level) -> void:
+	_level_ref = level
 	for i in range(_falcons.size() - 1, -1, -1):
 		var f: Dictionary = _falcons[i]
 		f["t"] = float(f["t"]) + dt
