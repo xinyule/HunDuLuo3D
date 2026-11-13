@@ -100,7 +100,7 @@ body {
 		// ===== 首载分段加载：index.pck 被切成多个分片托管，按序拉取拼回完整 pck 后
 		// 经 Engine.preloadFile 交给引擎，再以 --main-pack 启动。拼回内容与原 pck 逐字节一致。
 		const PCK_SHARDS = ['index.pck.00', 'index.pck.01', 'index.pck.02', 'index.pck.03', 'index.pck.04', 'index.pck.05', 'index.pck.06', 'index.pck.07', 'index.pck.08', 'index.pck.09', 'index.pck.10', 'index.pck.11', 'index.pck.12'];
-		const PCK_TOTAL = 390629696;
+		const PCK_TOTAL = 390639504;
 		async function startGameFromShards(onProgress) {
 			const initPromise = engine.init('index');
 			const parts = [];
@@ -133,7 +133,7 @@ body {
 		</script>
 
 		<script>
-const GODOT_CONFIG = {"args":[],"canvasResizePolicy":2,"ensureCrossOriginIsolationHeaders":true,"executable":"index","experimentalVK":false,"fileSizes":{"index.pck":390629696,"index.wasm":35376909},"focusCanvas":true,"gdextensionLibs":[]};
+const GODOT_CONFIG = {"args":[],"canvasResizePolicy":2,"ensureCrossOriginIsolationHeaders":true,"executable":"index","experimentalVK":false,"fileSizes":{"index.pck":390639504,"index.wasm":35376909},"focusCanvas":true,"gdextensionLibs":[]};
 const GODOT_THREADS_ENABLED = false;
 const engine = new Engine(GODOT_CONFIG);
 
