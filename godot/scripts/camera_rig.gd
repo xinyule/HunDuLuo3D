@@ -6,6 +6,7 @@ extends RefCounted
 
 var camera: Camera3D
 var aim_point := Vector3.ZERO
+var shake := 0.0 # 受击震屏强度（主循环置 1，每帧衰减）
 var _pos := Vector3(0, 3, 38)
 var _dist := 5.2
 var _fov := 70.0
@@ -54,6 +55,11 @@ func update_rig(dt: float, args: Dictionary) -> void:
 	var k := 1.0 - exp(-float(Data.CAMERA["smooth"]) * dt)
 	_pos = _pos.lerp(ok, k)
 	_apply(anchor, yaw, pitch)
+	# 受击震屏：位置小幅抖动 + 轻微滚转，快速衰减（疼但不晕）
+	if shake > 0.003:
+		shake = maxf(0.0, shake - dt * 2.2)
+		camera.global_position += Vector3(randf_range(-1, 1), randf_range(-1, 1), randf_range(-1, 1)) * 0.13 * shake
+		camera.rotation.z += randf_range(-1.0, 1.0) * 0.018 * shake
 	# 准星射线
 	var look_dir := (aim_point_hint(anchor, yaw, pitch) - _pos)
 	_update_aim(look_dir, targets)

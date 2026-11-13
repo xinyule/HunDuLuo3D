@@ -21,11 +21,11 @@ var barrier := 0.0
 var invuln := 0.0
 var fire_timer := 0.0
 var aim_pitch := 0.0
+var death_pos := Vector3.ZERO # 阵亡点：原地复活的落点（主循环按地形修正高度后使用）
 
 var _blink := false
 var _walk_phase := 0.0
 var _flip := 0.0
-var _flash_t := 0.0
 var _char_id := "bill"
 
 var visual: Node3D
@@ -38,9 +38,12 @@ var _hit_t := 0.0 # 受击反应剩余时间
 var _land_t := 0.0 # 落地动作剩余时间
 var _recoil := 0.0 # 开火后坐（0..1，驱动胸骨后仰）
 var _shield: MeshInstance3D
-var _flash: MeshInstance3D
+var _move_dir := Vector2(0, -1) # 实际行进方向（世界 XZ 单位向量）
+var _move_speed := 0.0 # 实际水平速度（m/s，驱动动画选片与倍速，防滑步）
+var _hip_yaw := 0.0 # 瞄准移动时髋部偏航（脚朝行进方向、上身对准星）
+var _speed_scale := 1.0
 
-static var _ual_scene: PackedScene = null
+static var _char_scenes: Dictionary = {} # char_id -> PackedScene（bill.glb / lance.glb，MPFB 高模）
 
 func _init() -> void:
 	hp_cells = int(Data.PLAYER["max_cells"])
@@ -53,14 +56,13 @@ func _mat(c: Color, rough: float = 0.8, metal: float = 0.0, tex: String = "") ->
 	return Util.pbr(c, tex, rough, metal)
 
 func _build_mesh() -> void:
-	var pal: Dictionary = Data.CHARACTERS[_char_id]
 	visual = Node3D.new()
 	add_child(visual)
-	if _ual_scene == null:
-		_ual_scene = load("res://assets/char/ual.glb")
-	_model = _ual_scene.instantiate() as Node3D
+	# 高模自带真实贴图与造型件（头巾/子弹带等已烘进 GLB），不再覆写材质、不再拼 primitive 挂件
+	if not _char_scenes.has(_char_id):
+		_char_scenes[_char_id] = load("res://assets/char/" + _char_id + ".glb")
+	_model = (_char_scenes[_char_id] as PackedScene).instantiate() as Node3D
 	visual.add_child(_model)
-	_tint_model(_model, Color(0.83, 0.62, 0.44) if _char_id == "bill" else Color(0.74, 0.52, 0.37))
 	_anim = _find_anim(_model)
 	if _anim:
 		for n in ["Idle", "Walk", "Jog_Fwd", "Sprint", "Crouch_Idle", "Crouch_Fwd", "Pistol_Idle", "Pistol_Aim_Up", "Pistol_Aim_Neutral", "Pistol_Aim_Down", "Swim_Idle"]:
@@ -70,8 +72,6 @@ func _build_mesh() -> void:
 	if skel:
 		_aim_mod = AimModifier.new()
 		skel.add_child(_aim_mod)
-		_attach_identity(skel, pal)
-		_attach_pants(skel, pal)
 		_attach_rifle(skel)
 	_play_clip("Idle")
 
@@ -79,9 +79,7 @@ func _build_mesh() -> void:
 	_shield = Util.sph(self, 1.3, Util.flat(Color(0.4, 0.8, 1, 0.20)), Vector3(0, 1.0, 0), 18, 12)
 	_shield.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	_shield.visible = false
-	# 枪口闪光（独立于 visual，避免翻滚影响）
-	_flash = Util.sph(get_parent() if get_parent() else self, 0.17, Util.glow(Color(1, 0.8, 0.35), 3.0, 0.0), Vector3.ZERO, 8, 6)
-	_flash.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	# 枪口火光改走 projectiles 的贴图面片池（spawn_muzzle_flash，带瞬时点光），旧发光球已拆除
 
 func _find_anim(n: Node) -> AnimationPlayer:
 	if n is AnimationPlayer:
@@ -101,93 +99,35 @@ func _find_skel(n: Node) -> Skeleton3D:
 			return r
 	return null
 
-func _tint_model(n: Node, main_color: Color) -> void:
-	if n is MeshInstance3D:
-		var mi := n as MeshInstance3D
-		if mi.mesh:
-			for s in mi.mesh.get_surface_count():
-				var orig := mi.get_active_material(s)
-				if orig is StandardMaterial3D:
-					var m := (orig as StandardMaterial3D).duplicate() as StandardMaterial3D
-					# 关节面（M_Joints）压暗当阴影色，主体面用肤色——模型无贴图，直接定色
-					m.albedo_color = main_color.darkened(0.42) if orig.resource_name.contains("Joint") else main_color
-					# 织物纹理（近白乘数 + 法线）：只加布料经纬与皮肤起伏，不改定色
-					m.albedo_texture = Util.tex_diff("weave")
-					m.normal_texture = Util.tex_nor("weave")
-					m.normal_scale = 0.35
-					m.texture_filter = 5 # 各向异性过滤
-					mi.set_surface_override_material(s, m)
-	for c in n.get_children():
-		_tint_model(c, main_color)
-
+## 挂件坐标约定（attach_diag.gd 实证）：本 rig 骨骼本地 +Y 恒指向子关节——
+## 头/脊柱往上、腿往膝踝、手臂往肘腕，全是要 +Y；脸朝 +Z。别再按「-Y 朝下肢末端」写偏移。
 func _bone_attach(skel: Skeleton3D, bone: String) -> BoneAttachment3D:
 	var ba := BoneAttachment3D.new()
 	ba.bone_name = bone
 	skel.add_child(ba)
 	return ba
 
-func _attach_identity(skel: Skeleton3D, pal: Dictionary) -> void:
-	var head := _bone_attach(skel, "DEF-head")
-	if _char_id == "bill":
-		# 比尔：红头巾（环 + 后飘尾）
-		var band_m := _mat(pal["bandana"], 0.85)
-		var bandana := MeshInstance3D.new()
-		var tm := TorusMesh.new()
-		tm.inner_radius = 0.095
-		tm.outer_radius = 0.15
-		bandana.mesh = tm
-		bandana.material_override = band_m
-		bandana.position = Vector3(0, 0.16, 0)
-		bandana.rotation.x = PI / 2.0
-		head.add_child(bandana)
-		Util.box(head, Vector3(0.09, 0.24, 0.03), band_m, Vector3(0.08, -0.02, -0.155))
-		# 白背心：筒形壳裹住躯干（挂 spine.002，平板会像广告牌——实测教训）
-		var chest := _bone_attach(skel, "DEF-spine.002")
-		var vest_m := _mat(pal["top"], 0.95, 0.0, "weave")
-		var vest := Util.cyl(chest, 0.20, 0.165, 0.52, vest_m, Vector3(0, 0.10, 0), 12)
-		vest.scale = Vector3(1.3, 1, 0.85)
-	else:
-		# 兰斯：长发（发盖 + 后发）+ 斜挎子弹带
-		var hair_m := _mat(pal["hair"], 0.95)
-		var cap := Util.sph(head, 0.145, hair_m, Vector3(0, 0.17, -0.01), 12, 9)
-		cap.scale = Vector3(1, 0.85, 1)
-		Util.box(head, Vector3(0.24, 0.36, 0.07), hair_m, Vector3(0, 0.0, -0.13))
-		var chest := _bone_attach(skel, "DEF-spine.003")
-		var strap := Util.box(chest, Vector3(0.46, 0.09, 0.38), _mat(Color(0.25, 0.18, 0.1), 0.85, 0.0, "weave"), Vector3(0, 0.1, 0))
-		strap.rotation.z = 0.6
-		# 子弹带正面一排黄铜子弹粒
-		var brass := _mat(Color(0.85, 0.62, 0.25), 0.35, 0.9)
-		for i in 6:
-			Util.cyl(strap, 0.021, 0.021, 0.055, brass, Vector3(-0.15 + float(i) * 0.06, 0.01, 0.20), 8)
+static var _m4a1_scene: PackedScene = null
 
-func _attach_pants(skel: Skeleton3D, pal: Dictionary) -> void:
-	var pants_m := _mat(pal["pants"], 0.9, 0.0, "weave")
-	var boot_m := _mat(Color(0.08, 0.07, 0.06), 0.7)
-	var pad_m := _mat(Color(0.12, 0.12, 0.13), 0.6, 0.2)
-	var hips := _bone_attach(skel, "DEF-hips")
-	Util.box(hips, Vector3(0.42, 0.3, 0.3), pants_m, Vector3(0, 0.03, 0))
-	Util.box(hips, Vector3(0.44, 0.08, 0.32), _mat(Color(0.3, 0.2, 0.1), 0.8), Vector3(0, 0.16, 0))
-	# 皮带扣（黄铜）
-	Util.box(hips, Vector3(0.1, 0.06, 0.025), _mat(Color(0.8, 0.65, 0.3), 0.3, 0.9), Vector3(0, 0.16, 0.163))
-	for side in ["L", "R"]:
-		var thigh := _bone_attach(skel, "DEF-thigh." + side)
-		Util.cyl(thigh, 0.11, 0.095, 0.54, pants_m, Vector3(0, -0.26, 0), 10)
-		var shin := _bone_attach(skel, "DEF-shin." + side)
-		Util.cyl(shin, 0.09, 0.075, 0.52, pants_m, Vector3(0, -0.25, 0), 10)
-		# 护膝
-		Util.box(shin, Vector3(0.17, 0.19, 0.05), pad_m, Vector3(0, -0.16, 0.082))
-		var foot := _bone_attach(skel, "DEF-foot." + side)
-		Util.box(foot, Vector3(0.11, 0.09, 0.27), boot_m, Vector3(0, -0.04, 0.05))
+## Mixamo GLB 的单位缩放（≈0.01）挂在 Skeleton3D 的父节点上，骨骼挂件会被同比例压缩，
+## 挂枪时按父节点缩放反向补偿，枪的实际尺寸才回到米制（集成实测教训）
+static func attach_scale_comp(skel: Skeleton3D) -> float:
+	var p := skel.get_parent() as Node3D
+	if p:
+		var s := p.transform.basis.get_scale().x
+		if s > 0.0001:
+			return 1.0 / s
+	return 1.0
 
 func _attach_rifle(skel: Skeleton3D) -> void:
-	var hand := _bone_attach(skel, "DEF-hand.R")
+	var hand := _bone_attach(skel, "hand_r")
 	var gun := Node3D.new()
 	hand.add_child(gun)
-	var gun_m := _mat(Color(0.1, 0.1, 0.11), 0.45, 0.8)
-	Util.box(gun, Vector3(0.07, 0.12, 0.62), gun_m, Vector3(0, 0, 0.24))
-	Util.box(gun, Vector3(0.045, 0.045, 0.3), gun_m, Vector3(0, 0.02, 0.68))
-	Util.box(gun, Vector3(0.06, 0.18, 0.08), gun_m, Vector3(0, -0.12, 0.16))
-	Util.box(gun, Vector3(0.055, 0.11, 0.2), gun_m, Vector3(0, 0.09, 0.28))
+	gun.scale = Vector3.ONE * attach_scale_comp(skel)
+	# 主角枪（定案）：带贴图 M4A1（nisu / OpenGameArt / CC0），原生 0.84m、枪身沿 +Z、原点近机匣
+	if _m4a1_scene == null:
+		_m4a1_scene = load("res://assets/weapons/m4a1.glb")
+	gun.add_child(_m4a1_scene.instantiate())
 	gun.position = Vector3(0, 0.03, 0.02)
 	gun.rotation.x = -0.3
 
@@ -231,9 +171,14 @@ func take_damage(cells: int) -> bool:
 	damaged.emit()
 	if hp_cells <= 0:
 		hp_cells = 0
+		death_pos = global_position
 		alive = false
 		_cur_clip = ""
 		_play_clip("Death01")
+		if _anim:
+			_anim.speed_scale = 1.0 # 死亡片段必须正放（后撤倒放倍速不能带进来）
+		if _aim_mod:
+			_aim_mod.hip_yaw = 0.0
 		died.emit()
 	else:
 		_hit_t = 0.32 # 没打死 → 受击反应片段
@@ -256,16 +201,13 @@ func apply_pickup(letter: String) -> void:
 func update_player(dt: float, snap: Dictionary, level, p_aim_yaw: float, p_aim_pitch: float, aiming_or_shooting: bool) -> void:
 	if not alive:
 		return
+	var prev_xz := Vector2(global_position.x, global_position.z)
 	aim_pitch = p_aim_pitch
 	if invuln > 0.0: invuln -= dt
 	if barrier > 0.0: barrier = maxf(0.0, barrier - dt)
 	_shield.visible = barrier > 0.0
 	if fire_timer > 0.0: fire_timer -= dt
 	if _recoil > 0.0: _recoil = maxf(0.0, _recoil - dt * 5.0)
-	if _flash_t > 0.0:
-		_flash_t -= dt
-		var m: StandardMaterial3D = _flash.material_override
-		m.albedo_color.a = maxf(0.0, _flash_t / 0.05) * 0.9
 	if _blink:
 		if invuln <= 0.0:
 			_blink = false
@@ -290,9 +232,10 @@ func update_player(dt: float, snap: Dictionary, level, p_aim_yaw: float, p_aim_p
 	var wz := move.x * sin_y + -move.y * cos_y
 	var nx := global_position.x + wx * speed * dt
 	var nz := global_position.z + wz * speed * dt
-	var half_w: float = level.width / 2.0 - 1.1
+	# 开放版边界：可活动范围收到山脊内侧（山坡爬得上，硬界在脊外，由地形隆起自然围住）
+	var half_w: float = level.width / 2.0 - 14.0
 	nx = clampf(nx, -half_w, half_w)
-	nz = clampf(nz, -level.length - 14.0, 30.0)
+	nz = clampf(nz, -level.length + 2.0, 30.0)
 	var resolved := _resolve_horizontal(nx, nz, level)
 	nx = resolved.x
 	nz = resolved.y
@@ -334,6 +277,15 @@ func update_player(dt: float, snap: Dictionary, level, p_aim_yaw: float, p_aim_p
 
 	if moving and grounded:
 		_walk_phase += dt * speed * 1.35
+	# 实测位移 → 行进方向与速度（动画选片/倍速按真实速度，脚步不打滑）
+	if dt > 0.0001:
+		var disp := Vector2(global_position.x, global_position.z) - prev_xz
+		var inst := disp.length() / dt
+		if inst > 0.4:
+			_move_dir = disp / disp.length()
+			_move_speed = lerpf(_move_speed, inst, 0.55)
+		else:
+			_move_speed = lerpf(_move_speed, 0.0, 0.45)
 	_sync_visual(dt, moving, aiming_or_shooting)
 
 func _resolve_horizontal(nx: float, nz: float, level) -> Vector2:
@@ -373,6 +325,9 @@ func _sync_visual(_dt: float, moving: bool, aiming: bool) -> void:
 	if _aim_mod:
 		var target_pitch := ((aim_pitch * 0.55) if aiming else 0.0) - _recoil * 0.13
 		_aim_mod.pitch = lerpf(_aim_mod.pitch, target_pitch, 0.35)
+		if not grounded or prone:
+			_hip_yaw = lerpf(_hip_yaw, 0.0, minf(1.0, _dt * 13.0))
+			_aim_mod.hip_yaw = _hip_yaw
 	var clip := "Idle"
 	if not grounded:
 		# 跳跃自带翻跟头 → 直接播 Roll 片段（原作标志动作）；坠落播 Jump
@@ -386,24 +341,43 @@ func _sync_visual(_dt: float, moving: bool, aiming: bool) -> void:
 	else:
 		visual.rotation.x = 0.0
 		visual.position.y = 0.0
+		_speed_scale = 1.0
+		var hip_target := 0.0
 		if aiming and not moving:
 			clip = "Pistol_Aim_Up" if aim_pitch > 0.22 else ("Pistol_Aim_Down" if aim_pitch < -0.22 else "Pistol_Aim_Neutral")
 		elif moving:
 			if aiming:
+				# 瞄准移动：髋朝行进方向（脚不横滑）、上身仍对准星；大角度后退用倒放近似后撤步
+				var rel := wrapf(atan2(_move_dir.x, _move_dir.y) - facing, -PI, PI)
+				hip_target = clampf(rel, -0.9, 0.9)
 				clip = "Walk"
-			elif _sprinting:
+				var base := clampf(_move_speed / 2.1, 0.5, 2.4)
+				_speed_scale = -base if absf(rel) > 2.0 else base
+			elif _move_speed > 9.0:
 				clip = "Sprint"
-			else:
+				_speed_scale = clampf(_move_speed / 6.8, 0.7, 2.2)
+			elif _move_speed > 3.4:
 				clip = "Jog_Fwd"
+				_speed_scale = clampf(_move_speed / 4.6, 0.7, 2.2)
+			else:
+				clip = "Walk"
+				_speed_scale = clampf(_move_speed / 2.1, 0.5, 1.8)
+		_hip_yaw = lerpf(_hip_yaw, hip_target, minf(1.0, _dt * 13.0))
+		if _aim_mod:
+			_aim_mod.hip_yaw = _hip_yaw
 	# 一次性动作片段优先：受击 > 落地
 	if _hit_t > 0.0: _hit_t -= _dt
 	if _land_t > 0.0: _land_t -= _dt
 	if grounded and not prone:
 		if _hit_t > 0.0:
 			clip = "Hit_Chest"
+			_speed_scale = 1.0
 		elif _land_t > 0.0:
 			clip = "Jump_Land"
+			_speed_scale = 1.0
 	_play_clip(clip)
+	if _anim:
+		_anim.speed_scale = _speed_scale
 
 func muzzle_world() -> Vector3:
 	var fx := sin(facing)
@@ -433,15 +407,12 @@ func try_shoot(projectiles, aim_point: Vector3) -> bool:
 			dir += right * (randf() - 0.5) * float(w["spread"]) * 2.0
 			dir += up * (randf() - 0.5) * float(w["spread"]) * 2.0
 		projectiles.spawn_player_bullet(muzzle, dir.normalized(), w)
-	_flash.global_position = muzzle + base_dir * 0.25
-	var m: StandardMaterial3D = _flash.material_override
-	m.albedo_color.a = 0.9
-	_flash_t = 0.05
+	# 开火反馈：枪口火光面片（带点光）+ 向右抛出弹壳（每开一枪一壳，散射枪按发计）
+	projectiles.spawn_muzzle_flash(muzzle + base_dir * 0.3, base_dir, 1.0, true)
+	projectiles.spawn_shell(muzzle - base_dir * 0.18 + right * 0.12 + Vector3(0, 0.04, 0), right)
 	_recoil = 1.0 # 后坐：胸骨短暂后仰（_sync_visual 消费）
 	AudioSys.play("shoot" if weapon != "M" else "shoot_m", -4.0)
 	return true
 
 func destroy_player() -> void:
-	if is_instance_valid(_flash):
-		_flash.queue_free()
 	queue_free()

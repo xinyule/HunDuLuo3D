@@ -1,0 +1,37 @@
+[remap]
+
+importer="texture"
+type="CompressedTexture2D"
+uid="uid://com0r8y0usj0p"
+path="res://.godot/imported/lance_Ch31_1001_Specular.jpg-b359fca5ec93b95bb5271691d9baea96.ctex"
+metadata={
+"vram_texture": false
+}
+generator_parameters={
+"md5": "f177a8377663d159e7a8c7e851047b28"
+}
+
+[deps]
+
+source_file="res://assets/char/lance_Ch31_1001_Specular.jpg"
+dest_files=["res://.godot/imported/lance_Ch31_1001_Specular.jpg-b359fca5ec93b95bb5271691d9baea96.ctex"]
+
+[params]
+
+compress/mode=0
+compress/high_quality=false
+compress/lossy_quality=0.7
+compress/hdr_compression=1
+compress/normal_map=0
+compress/channel_pack=0
+mipmaps/generate=true
+mipmaps/limit=-1
+roughness/mode=0
+roughness/src_normal=""
+process/fix_alpha_border=true
+process/premult_alpha=false
+process/normal_map_invert_y=false
+process/hdr_as_srgb=false
+process/hdr_clamp_exposure=false
+process/size_limit=0
+detect_3d/compress_to=1

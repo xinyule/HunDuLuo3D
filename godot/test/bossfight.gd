@@ -34,14 +34,14 @@ func _on_frame() -> void:
 				_main.start_game()
 				_main._advance_dialog()
 				_main.player.barrier = 99999.0
-				# 入口线（dist=179）之外：dist=160 处不应触发
-				_main.player.global_position = Vector3(0, 0, 26.0 - 160.0)
+				# 入口线（dist=length-8）之外：length-40 处不应触发（距 Boss 平面 56m > 38m 触发距）
+				_main.player.global_position = Vector3(0, 0, 26.0 - (_main.current_level.length - 40.0))
 				_phase = 1
 		1:
 			if _frame > 70:
 				_check(not _main.current_level.boss_activated, "入口线外 Boss 未触发")
-				# 走进竞技场：dist=185（已越线 6 米）
-				_main.player.global_position = Vector3(0, 0, 26.0 - 185.0)
+				# 走进竞技场：dist=length-4（已越线）
+				_main.player.global_position = Vector3(0, 0, 26.0 - (_main.current_level.length - 4.0))
 				_phase = 2
 		2:
 			if _frame > 110:

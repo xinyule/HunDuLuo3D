@@ -24,6 +24,18 @@ var _death_clip := false
 var _death_len := 0.85
 var _t := 0.0
 var _fire_timer := 1.0
+var _alert := false # 交战状态：看见/贴近/挨打才激活（开放版全量预置敌人的行为门）
+var _los_t := 0.0 # 视线复核计时（错峰降频）
+var _los_ok := false
+var _dormant := 0.0 # 远处降频步进累积
+var _aim_mod_e: AimModifier = null # 射手上身俯仰（骨骼后处理，与主角同套）
+var _home := Vector3.ZERO # 出生点（营地中心）：未交战时在周围巡逻
+var _patrol_t := 0.0
+var _patrol_dest := Vector3.ZERO
+var _patrol_moving := false
+var _alert_icon: Label3D = null # 发现玩家瞬间的「！」
+var _alert_t := 0.0
+var _was_alert := false
 var _burst_left := 0
 var _melee_timer := 0.0
 var _facing := PI
@@ -46,23 +58,34 @@ var _ak_phase := 0 # 0潜伏 1升起 2射击 3下沉
 var _ak_timer := 0.0
 var _ak_shots := 0
 
-const HUMANOID := ["rifleman", "runner", "sniper", "mortar", "garth", "langel", "akbar"]
+const HUMANOID := ["rifleman", "runner", "sniper", "mortar", "garth", "langel", "akbar", "bomber", "shield"]
 const TINTS := {
 	# 整体提饱和提亮与环境（丛林绿褐/基地灰）拉开距离——用户实测「NPC 糊在背景里看不清」（2026-11-12 三修）
 	"rifleman": Color(0.56, 0.62, 0.24), "runner": Color(0.88, 0.18, 0.1),
 	"sniper": Color(0.52, 0.4, 0.75), "mortar": Color(0.72, 0.5, 0.26),
 	"garth": Color(0.34, 0.37, 0.46), "langel": Color(0.45, 0.58, 0.8),
 	"akbar": Color(0.3, 0.55, 0.6),
+	"bomber": Color(0.42, 0.44, 0.4), "shield": Color(0.5, 0.52, 0.55),
 }
 
-func setup(p_type: String, pos: Vector3, ctx: Dictionary, soldier_scene: PackedScene) -> void:
+## 新兵种数值兜底（4A 线）：Data.ENEMIES 的正式条目在 data.gd（合并阶段抄入，值须与此严格一致）；
+## setup 先查 Data.ENEMIES、缺失才用这里，保证合并前后行为不变。
+const FALLBACK_DATA := {
+	"bomber": {"hp": 30, "speed": 0.0, "radius": 0.55, "score": 200, "fire_interval": 2.9, "orb_speed": 0.0, "range": 36.0},
+	"shield": {"hp": 30, "speed": 2.2, "radius": 0.55, "score": 250, "fire_interval": 3.0, "orb_speed": 17.0, "range": 40.0},
+}
+
+func setup(p_type: String, pos: Vector3, ctx: Dictionary, soldier_scenes: Dictionary) -> void:
 	type = p_type
 	_ctx = ctx
-	_data = Data.ENEMIES[type]
+	_data = Data.ENEMIES.get(type, {})
+	if _data.is_empty():
+		_data = FALLBACK_DATA.get(type, {})
 	hp = int(_data["hp"])
 	max_hp = hp
 	score_value = int(_data["score"])
 	global_position = pos
+	_home = pos
 	_base_x = pos.x
 	_base_y = pos.y
 	_t = randf() * 10.0
@@ -80,7 +103,7 @@ func setup(p_type: String, pos: Vector3, ctx: Dictionary, soldier_scene: PackedS
 	elif type == "statue":
 		hit_y = pos.y + 1.6
 		hit_r = 1.05
-	_build(soldier_scene)
+	_build(soldier_scenes)
 	_build_hp_bar()
 
 func _reg_mat(m: Material) -> Material:
@@ -93,9 +116,9 @@ func _pbr(c: Color, rough: float = 0.8, metal: float = 0.0, tex: String = "") ->
 	_flash_mats.append(m)
 	return m
 
-func _build(soldier_scene: PackedScene) -> void:
-	if HUMANOID.has(type) and soldier_scene != null:
-		_build_soldier(soldier_scene)
+func _build(soldier_scenes: Dictionary) -> void:
+	if HUMANOID.has(type) and soldier_scenes.has(type):
+		_build_soldier(soldier_scenes[type])
 		return
 	match type:
 		"turret": _build_turret()
@@ -110,9 +133,9 @@ func _build_soldier(soldier_scene: PackedScene) -> void:
 	add_child(_model)
 	if type == "garth":
 		_model.scale = Vector3.ONE * 1.08
-	# 染色：复制导入材质并乘色调（保留原贴图）
-	var tint: Color = TINTS[type]
-	_tint_recursive(_model, tint)
+	# Mixamo 集成：兵种区分 = 各自独立 GLB（旧 Gear 装备件/贴图染色系统已废弃）；
+	# 这里只做材质逐实例复制登记，保证受击闪白按实例生效不串扰
+	_collect_flash_mats()
 	_anim = _find_anim(_model)
 	if _anim:
 		for n in ["Idle", "Walk", "Jog_Fwd", "Sprint", "Pistol_Idle", "Swim_Idle"]:
@@ -124,22 +147,41 @@ func _build_soldier(soldier_scene: PackedScene) -> void:
 		match type:
 			"runner": _stance_clip = "Jog_Fwd"
 			"akbar": _stance_clip = "Swim_Idle"
-			"rifleman", "sniper", "garth", "langel": _stance_clip = "Pistol_Idle"
+			"rifleman", "sniper", "garth", "langel", "shield": _stance_clip = "Pistol_Idle"
 			_: _stance_clip = "Idle"
 		_anim.play(_stance_clip)
-	# 枪械（除红衣突击兵无枪、榴弹兵用筒）
-	if type != "runner" and type != "mortar":
-		_attach_gun(_model, type == "sniper")
+	# 枪械（Mixamo 集成定案配枪；迫击炮兵用拼装迫击炮道具；掷弹兵双手掷雷不配枪）
+	if type != "mortar" and type != "bomber":
+		_attach_gun(_model, type)
 	if type == "mortar":
-		var tube := Util.cyl(self, 0.11, 0.13, 0.85, _pbr(Color(0.2, 0.2, 0.2), 0.5, 0.6), Vector3(0.48, 0.62, 0.15))
-		tube.rotation.z = -0.5
-		Util.box(self, Vector3(0.5, 0.22, 0.5), _pbr(Color(0.27, 0.27, 0.27), 0.6, 0.4), Vector3(0.48, 0.11, 0.15))
-	_attach_gear()
+		_build_mortar_prop()
+	if type == "shield":
+		_build_shield_prop()
+	# 警觉标记：发现玩家瞬间头顶冒「！」（先有反应、再开火，不是站桩靶子）
+	_alert_icon = Label3D.new()
+	_alert_icon.text = "!"
+	_alert_icon.font_size = 128
+	_alert_icon.modulate = Color(1, 0.55, 0.15)
+	_alert_icon.outline_size = 18
+	_alert_icon.outline_modulate = Color(0.25, 0.05, 0.0)
+	_alert_icon.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+	_alert_icon.position = Vector3(0, 2.4, 0)
+	_alert_icon.visible = false
+	add_child(_alert_icon)
+	if type in ["rifleman", "garth", "langel", "sniper", "mortar", "shield"]:
+		var skel2 := _find_skeleton(_model)
+		if skel2:
+			_aim_mod_e = AimModifier.new()
+			skel2.add_child(_aim_mod_e)
 	if type == "akbar":
 		_model.position.y = -1.05
 		targetable = false
 
-func _tint_recursive(n: Node, tint: Color) -> void:
+## 材质逐实例复制登记：受击闪白（_flash_mats）与命中表现按实例走，不串扰同场景的其他敌人
+func _collect_flash_mats() -> void:
+	_collect_mats_recursive(_model)
+
+func _collect_mats_recursive(n: Node) -> void:
 	if n is MeshInstance3D:
 		var mi := n as MeshInstance3D
 		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
@@ -149,18 +191,11 @@ func _tint_recursive(n: Node, tint: Color) -> void:
 				var orig := mi.get_active_material(s)
 				if orig is StandardMaterial3D:
 					var m := (orig as StandardMaterial3D).duplicate() as StandardMaterial3D
-					m.albedo_color = tint
-					# 与主角同款织物纹理（乘数+法线），纯色面不再塑料感
-					m.albedo_texture = Util.tex_diff("weave")
-					m.normal_texture = Util.tex_nor("weave")
-					m.normal_scale = 0.35
-					m.texture_filter = 5 # 各向异性过滤
-					m.emission_enabled = false
 					mi.set_surface_override_material(s, m)
 					_mats.append(m)
 					_flash_mats.append(m)
 	for ch in n.get_children():
-		_tint_recursive(ch, tint)
+		_collect_mats_recursive(ch)
 
 func _find_anim(n: Node) -> AnimationPlayer:
 	if n is AnimationPlayer:
@@ -180,25 +215,91 @@ func _find_skeleton(n: Node) -> Skeleton3D:
 			return r
 	return null
 
-func _attach_gun(model: Node3D, long_gun: bool) -> void:
+## 敌兵配枪（Mixamo 集成定案）：AK=步枪兵/突击兵、M24=狙击手、低模 M4=其余持枪兵种
+## 低模枪（Quaternius）枪身沿 +X、单位偏大：按实测 AABB 居中后绕 Y 转到 +Z、按目标枪长缩放
+const GUN_BY_TYPE := {
+	"rifleman": "ak", "runner": "ak", "sniper": "m24",
+	"garth": "m4_low", "langel": "m4_low", "akbar": "m4_low",
+}
+const GUN_FIT := { # key -> [x 跨度, AABB 中心, 目标枪长]
+	"ak": [5.4937, Vector3(1.0795, 0.0635, 0.0), 0.95],
+	"m24": [7.2946, Vector3(0.6055, -0.046, 0.0745), 1.2],
+	"m4_low": [5.1688, Vector3(0.825, 0.177, 0.0005), 0.95],
+}
+static var _gun_scenes: Dictionary = {}
+
+func _attach_gun(model: Node3D, p_type: String) -> void:
+	var key: String = GUN_BY_TYPE.get(p_type, "m4_low")
+	if not _gun_scenes.has(key):
+		_gun_scenes[key] = load("res://assets/weapons/%s.glb" % key)
+	var fit: Array = GUN_FIT[key]
+	var sc: float = float(fit[2]) / float(fit[0])
 	var gun := Node3D.new()
-	var gm := Util.pbr(Color(0.09, 0.09, 0.1), "", 0.45, 0.8)
-	Util.box(gun, Vector3(0.07, 0.11, 1.0 if long_gun else 0.6), gm, Vector3(0, 0, 0.3))
-	Util.box(gun, Vector3(0.05, 0.16, 0.07), gm, Vector3(0, -0.1, 0.12))
+	var rot := Node3D.new()
+	rot.rotation.y = -PI / 2.0 # +X 枪身 -> +Z（枪口朝前；方向由实拍复核）
+	rot.scale = Vector3.ONE * sc
+	gun.add_child(rot)
+	var inst: Node3D = (_gun_scenes[key] as PackedScene).instantiate()
+	inst.position = -(fit[1] as Vector3)
+	rot.add_child(inst)
 	var skel := _find_skeleton(model)
 	if skel:
 		for i in skel.get_bone_count():
-			if skel.get_bone_name(i).contains("RightHand") or skel.get_bone_name(i) == "DEF-hand.R":
+			if skel.get_bone_name(i) == "hand_r":
 				var ba := BoneAttachment3D.new()
 				ba.bone_name = skel.get_bone_name(i)
 				skel.add_child(ba)
 				ba.add_child(gun)
-				gun.position = Vector3(0, 0.05, 0.05)
+				gun.scale = Vector3.ONE * Player.attach_scale_comp(skel) # 同 player：反向补偿 GLB 单位缩放
+				gun.position = Vector3(0, 0.05, 0.3) # 枪身已按 AABB 居中，前移让握把落在约 1/3 处（枪口朝前）
 				gun.rotation.x = -0.35
 				return
 	model.add_child(gun)
 	gun.position = Vector3(0.3, 1.1, 0.3)
 
+## 迫击炮道具（定案拼装，无正品模型）：斜置炮管 + Bipod 双脚架（Quaternius CC0）+ 底板
+func _build_mortar_prop() -> void:
+	var prop := Node3D.new()
+	prop.position = Vector3(0.48, 0, 0.15)
+	add_child(prop)
+	var metal := _pbr(Color(0.23, 0.24, 0.22), 0.5, 0.6)
+	var tube := Util.cyl(prop, 0.085, 0.095, 1.05, metal, Vector3(0, 0.52, 0.02))
+	tube.rotation.x = -0.72 # 炮口朝前上方
+	var bipod: Node3D = (load("res://assets/weapons/bipod.glb") as PackedScene).instantiate()
+	bipod.scale = Vector3.ONE * 0.45 # 原生高 1.33、原点在顶：缩放后腿长约 0.6
+	bipod.position = Vector3(0, 0.64, 0.3)
+	prop.add_child(bipod)
+	Util.box(prop, Vector3(0.56, 0.09, 0.56), metal, Vector3(0, 0.045, -0.2))
+
+## 盾牌兵大盾：背板大一圈当描边 + 主板 + 猩红横带 + 中央铆钉圆头，整体 1.06 宽 × 1.58 高。
+## 挂载走躯干骨（spine_02 优先）+ attach_scale_comp 缩放补偿：盾随身体姿态/死亡倒地一起动，
+## 不再尸体倒了盾还立着（首轮截图实锤）；骨骼本地 +Y 沿脊柱向上、+Z 朝前（与 AimModifier 的
+## spine 俯仰轴约定一致），板面以骨原点（≈胸高 1.05m）为中心。无骨骼时退回模型空间挂载。
+func _build_shield_prop() -> void:
+	var rim := _pbr(Color(0.52, 0.54, 0.58), 0.38, 0.85)
+	var plate := _pbr(Color(0.3, 0.32, 0.36), 0.46, 0.8)
+	var holder := Node3D.new()
+	var base_y := 1.0 # 模型空间回退时板心高度；骨骼挂载时骨原点即胸高，板心归零
+	var skel := _find_skeleton(_model)
+	var ba: BoneAttachment3D = null
+	if skel:
+		for bn in ["spine_02", "spine_01", "spine_03"]:
+			ba = _eba(skel, bn)
+			if ba:
+				break
+	if ba:
+		ba.add_child(holder)
+		holder.scale = Vector3.ONE * Player.attach_scale_comp(skel)
+		base_y = 0.0
+	else:
+		add_child(holder)
+	Util.box(holder, Vector3(1.06, 1.58, 0.045), rim, Vector3(0, base_y, 0.435))
+	Util.box(holder, Vector3(0.98, 1.5, 0.06), plate, Vector3(0, base_y, 0.465))
+	Util.box(holder, Vector3(0.98, 0.17, 0.065), _pbr(Color(0.55, 0.09, 0.07), 0.55, 0.3), Vector3(0, base_y + 0.34, 0.468))
+	var boss := Util.sph(holder, 0.13, rim, Vector3(0, base_y + 0.02, 0.5), 12, 9)
+	boss.scale = Vector3(1.0, 1.0, 0.55)
+
+## 挂件坐标约定同 player.gd：骨骼本地 +Y 指向子关节，脸朝 +Z（attach_diag.gd 实证）
 func _eba(skel: Skeleton3D, bone: String) -> BoneAttachment3D:
 	if skel == null or skel.find_bone(bone) < 0:
 		return null
@@ -206,69 +307,6 @@ func _eba(skel: Skeleton3D, bone: String) -> BoneAttachment3D:
 	ba.bone_name = bone
 	skel.add_child(ba)
 	return ba
-
-func _helmet(skel: Skeleton3D, color: Color, metal: float = 0.15) -> void:
-	var head := _eba(skel, "DEF-head")
-	if head == null:
-		return
-	var hm := _pbr(color, 0.55, metal)
-	var dome := Util.sph(head, 0.158, hm, Vector3(0, 0.175, 0), 14, 10)
-	dome.scale = Vector3(1.1, 0.68, 1.12)
-	Util.cyl(head, 0.185, 0.19, 0.028, hm, Vector3(0, 0.132, 0), 14)
-
-## 兵种装备件：头盔/胸甲/肩甲/背包/帽兜/头带——兵种一眼可辨
-func _attach_gear() -> void:
-	var skel := _find_skeleton(_model)
-	if skel == null:
-		return
-	var tint: Color = TINTS[type]
-	match type:
-		"rifleman":
-			_helmet(skel, Color(0.78, 0.8, 0.35)) # 亮黄盔，丛林里最扎眼
-		"garth":
-			_helmet(skel, Color(0.16, 0.17, 0.2), 0.55)
-			var visor := _eba(skel, "DEF-head")
-			if visor:
-				Util.box(visor, Vector3(0.17, 0.035, 0.03), Util.glow(Color(1, 0.45, 0.1), 2.2), Vector3(0, 0.1, 0.148))
-			var armor := _pbr(Color(0.2, 0.21, 0.25), 0.42, 0.65)
-			var chest := _eba(skel, "DEF-spine.002")
-			if chest:
-				Util.box(chest, Vector3(0.38, 0.42, 0.09), armor, Vector3(0, 0.1, 0.155))
-			for side in ["L", "R"]:
-				var arm := _eba(skel, "DEF-upper_arm." + side)
-				if arm:
-					Util.box(arm, Vector3(0.2, 0.12, 0.24), armor, Vector3(0, 0.03, 0))
-		"langel":
-			_helmet(skel, Color(0.92, 0.94, 0.97), 0.4) # 白盔
-		"mortar":
-			_helmet(skel, Color(0.85, 0.55, 0.2)) # 亮橙盔
-			var back := _eba(skel, "DEF-spine.002")
-			if back:
-				Util.box(back, Vector3(0.36, 0.46, 0.18), _pbr(Color(0.3, 0.24, 0.14), 0.9), Vector3(0, 0.1, -0.21))
-				Util.cyl(back, 0.05, 0.05, 0.4, _pbr(Color(0.55, 0.42, 0.2), 0.6, 0.3), Vector3(0.12, 0.42, -0.21), 8)
-		"sniper":
-			var head := _eba(skel, "DEF-head")
-			if head:
-				var cm := _pbr(Color(0.62, 0.5, 0.85), 0.9)
-				Util.cyl(head, 0.15, 0.158, 0.085, cm, Vector3(0, 0.185, 0), 12)
-				Util.box(head, Vector3(0.17, 0.025, 0.15), cm, Vector3(0, 0.148, 0.165))
-		"runner":
-			var head2 := _eba(skel, "DEF-head")
-			if head2:
-				var band := MeshInstance3D.new()
-				var tm := TorusMesh.new()
-				tm.inner_radius = 0.095
-				tm.outer_radius = 0.148
-				band.mesh = tm
-				band.material_override = _pbr(tint.darkened(0.45), 0.9)
-				band.position = Vector3(0, 0.155, 0)
-				band.rotation.x = PI / 2.0
-				head2.add_child(band)
-	# 统一敌方标识：左臂猩红臂章（水里的 Akbar 除外）——任何距离先认红
-	if type != "akbar":
-		var arm := _eba(skel, "DEF-upper_arm.L")
-		if arm:
-			Util.box(arm, Vector3(0.17, 0.09, 0.19), _pbr(Color(0.8, 0.07, 0.09), 0.7), Vector3(0, -0.08, 0))
 
 ## 一次性反应片段（受击/射击）：播完由 update_enemy 拉回站姿
 func _react(clip: String, dur: float) -> void:
@@ -285,20 +323,28 @@ func _build_fallback_soldier() -> void:
 	Util.capsule(_model, 0.3, 1.15, _pbr(tint, 0.9), Vector3(0, 1.0, 0))
 	Util.sph(_model, 0.17, _pbr(Color(0.79, 0.63, 0.42), 0.6), Vector3(0, 1.72, 0))
 
+func _find_named(n: Node, nm: String) -> Node:
+	if n.name == nm:
+		return n
+	for ch in n.get_children():
+		var r := _find_named(ch, nm)
+		if r:
+			return r
+	return null
+
 func _build_turret() -> void:
+	# Quaternius Turret Cannon（CC0）：Top 件原点在模型中心，update 直接转它的偏航
 	_model = Node3D.new()
 	add_child(_model)
-	var metal := _pbr(Color(0.42, 0.45, 0.4), 0.55, 0.6, "metal")
-	Util.cyl(_model, 0.85, 1.05, 0.6, metal, Vector3(0, 0.3, 0), 14)
-	_head = Node3D.new()
-	_head.position.y = 0.95
-	_model.add_child(_head)
-	Util.box(_head, Vector3(1.05, 0.65, 0.85), _pbr(Color(0.3, 0.36, 0.28), 0.5, 0.6, "metal"), Vector3.ZERO)
-	var bm := _pbr(Color(0.1, 0.1, 0.1), 0.4, 0.8)
-	for bx in [-0.22, 0.22]:
-		var barrel := Util.cyl(_head, 0.08, 0.08, 0.8, bm, Vector3(bx, 0, 0.55))
-		barrel.rotation.x = PI / 2.0
-	Util.sph(_head, 0.1, _reg_mat(Util.glow(Color(1, 0.15, 0.15), 2.5)), Vector3(0, 0.12, 0.44), 8, 6)
+	var inst: Node3D = (load("res://assets/vehicles/turret_cannon.glb") as PackedScene).instantiate()
+	inst.scale = Vector3.ONE * 1.6
+	_model.add_child(inst)
+	_head = _find_named(inst, "Turret_Cannon_Top") as Node3D
+	if _head == null:
+		_head = Node3D.new()
+		_head.position.y = 0.95
+		_model.add_child(_head)
+	_collect_flash_mats()
 
 func _build_roller() -> void:
 	_model = Node3D.new()
@@ -325,40 +371,155 @@ func _build_spore() -> void:
 		leg.rotation.z = cos(a) * 0.5
 		leg.rotation.x = -sin(a) * 0.5
 
+## 石像粗粝化（自实现，不依赖 level.gd）：细分盒网格，顶点按「位置向量噪声」位移——
+## 位移只取决于顶点位置，同一位置在不同面上位移一致，棱边不裂；法线按位置焊接平滑。
+## 轮廓尺寸/位置与旧盒子完全一致，仅表面起伏 ±0.05，碰撞/hit_r 不受影响。
+static var _stone_mesh_cache: Dictionary = {}
+
+func _stone_box(parent: Node, size: Vector3, mat: Material, pos: Vector3, seed: float) -> MeshInstance3D:
+	var key := "%s|%s" % [str(size), str(seed)]
+	if not _stone_mesh_cache.has(key):
+		_stone_mesh_cache[key] = _make_noisy_box(size, seed)
+	var mi := MeshInstance3D.new()
+	mi.mesh = _stone_mesh_cache[key]
+	mi.material_override = mat
+	mi.position = pos
+	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	parent.add_child(mi)
+	return mi
+
+func _hash3(x: int, y: int, z: int, seed: float) -> float:
+	var s := sin(float(x) * 127.1 + float(y) * 311.7 + float(z) * 74.7 + seed * 269.5) * 43758.5453
+	return s - floor(s)
+
+func _vnoise(p: Vector3, seed: float) -> float:
+	var fx: float = floor(p.x)
+	var fy: float = floor(p.y)
+	var fz: float = floor(p.z)
+	var xi := int(fx)
+	var yi := int(fy)
+	var zi := int(fz)
+	var xf: float = p.x - fx
+	var yf: float = p.y - fy
+	var zf: float = p.z - fz
+	var u: float = xf * xf * (3.0 - 2.0 * xf)
+	var v: float = yf * yf * (3.0 - 2.0 * yf)
+	var w: float = zf * zf * (3.0 - 2.0 * zf)
+	var c000: float = _hash3(xi, yi, zi, seed)
+	var c100: float = _hash3(xi + 1, yi, zi, seed)
+	var c010: float = _hash3(xi, yi + 1, zi, seed)
+	var c110: float = _hash3(xi + 1, yi + 1, zi, seed)
+	var c001: float = _hash3(xi, yi, zi + 1, seed)
+	var c101: float = _hash3(xi + 1, yi, zi + 1, seed)
+	var c011 := _hash3(xi, yi + 1, zi + 1, seed)
+	var c111 := _hash3(xi + 1, yi + 1, zi + 1, seed)
+	return lerpf(lerpf(lerpf(c000, c100, u), lerpf(c010, c110, u), v), lerpf(lerpf(c001, c101, u), lerpf(c011, c111, u), v), w)
+
+func _make_noisy_box(size: Vector3, seed: float) -> ArrayMesh:
+	var n := 3 # 每面 3×3 细分
+	var amp := 0.05
+	var hx := size.x * 0.5
+	var hy := size.y * 0.5
+	var hz := size.z * 0.5
+	# 六面：[法线, U 轴, V 轴, 起始角点]（U×V=法线，三角绕序统一向外）
+	var faces := [
+		[Vector3(0, 0, 1), Vector3(1, 0, 0), Vector3(0, 1, 0), Vector3(-hx, -hy, hz)],
+		[Vector3(0, 0, -1), Vector3(-1, 0, 0), Vector3(0, 1, 0), Vector3(hx, -hy, -hz)],
+		[Vector3(1, 0, 0), Vector3(0, 0, -1), Vector3(0, 1, 0), Vector3(hx, -hy, hz)],
+		[Vector3(-1, 0, 0), Vector3(0, 0, 1), Vector3(0, 1, 0), Vector3(-hx, -hy, -hz)],
+		[Vector3(0, 1, 0), Vector3(1, 0, 0), Vector3(0, 0, -1), Vector3(-hx, hy, -hz)],
+		[Vector3(0, -1, 0), Vector3(1, 0, 0), Vector3(0, 0, 1), Vector3(-hx, -hy, hz)],
+	]
+	var verts := PackedVector3Array()
+	var uvs := PackedVector2Array()
+	var indices := PackedInt32Array()
+	for fi in faces.size():
+		var face: Array = faces[fi]
+		var uax: Vector3 = face[1]
+		var vax: Vector3 = face[2]
+		var corner: Vector3 = face[3]
+		var ulen := size.x if absf(uax.x) > 0.5 else size.y if absf(uax.y) > 0.5 else size.z
+		var vlen := size.x if absf(vax.x) > 0.5 else size.y if absf(vax.y) > 0.5 else size.z
+		var base := verts.size()
+		for j in n + 1:
+			for i in n + 1:
+				var p: Vector3 = corner + uax * (ulen * float(i) / float(n)) + vax * (vlen * float(j) / float(n))
+				var q := p * 1.9
+				var off := Vector3(_vnoise(q, seed) - 0.5, _vnoise(q, seed + 31.7) - 0.5, _vnoise(q, seed + 57.3) - 0.5) * (2.0 * amp)
+				verts.append(p + off)
+				uvs.append(Vector2(float(i) / float(n), float(j) / float(n)))
+		for j in n:
+			for i in n:
+				var a := base + j * (n + 1) + i
+				var b := a + 1
+				var c := a + n + 1
+				var d := c + 1
+				indices.append_array([a, b, d, a, d, c])
+	# 法线：按焊接位置累加面法线后归一（棱角平滑成粗粝石面）
+	var acc := {}
+	for t in range(0, indices.size(), 3):
+		var ia := indices[t]
+		var ib := indices[t + 1]
+		var ic := indices[t + 2]
+		var fn := (verts[ib] - verts[ia]).cross(verts[ic] - verts[ia])
+		for idx in [ia, ib, ic]:
+			var k := str(verts[idx])
+			acc[k] = (acc.get(k, Vector3.ZERO) as Vector3) + fn
+	var normals := PackedVector3Array()
+	for vi in verts.size():
+		var an := acc.get(str(verts[vi]), Vector3.UP) as Vector3
+		normals.append(an.normalized() if an.length() > 0.0001 else Vector3.UP)
+	var arrays := []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = verts
+	arrays[Mesh.ARRAY_NORMAL] = normals
+	arrays[Mesh.ARRAY_TEX_UV] = uvs
+	arrays[Mesh.ARRAY_INDEX] = indices
+	var mesh := ArrayMesh.new()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	return mesh
+
 func _build_statue() -> void:
 	_model = Node3D.new()
 	add_child(_model)
 	var stone := _pbr(Color(0.75, 0.72, 0.66), 0.95, 0.0, "rock")
-	Util.box(_model, Vector3(1.5, 0.8, 1.5), stone, Vector3(0, 0.4, 0))
-	Util.box(_model, Vector3(1.1, 1.0, 1.1), stone, Vector3(0, 1.3, 0))
+	_stone_box(_model, Vector3(1.5, 0.8, 1.5), stone, Vector3(0, 0.4, 0), 3.1)
+	_stone_box(_model, Vector3(1.1, 1.0, 1.1), stone, Vector3(0, 1.3, 0), 7.7)
 	_head = Node3D.new()
 	_head.position = Vector3(0, 2.15, 0)
 	_model.add_child(_head)
-	Util.box(_head, Vector3(0.85, 0.7, 1.05), stone, Vector3.ZERO)
+	_stone_box(_head, Vector3(0.85, 0.7, 1.05), stone, Vector3.ZERO, 12.3)
 	for hx in [-0.28, 0.28]:
 		var horn := Util.cyl(_head, 0.01, 0.11, 0.45, stone, Vector3(hx, 0.5, -0.1), 6)
 		Util.sph(_head, 0.08, _reg_mat(Util.glow(Color(1, 0.8, 0.2), 2.5)), Vector3(hx, 0.1, 0.5), 8, 6)
 	Util.box(_head, Vector3(0.5, 0.2, 0.1), _reg_mat(Util.glow(Color(1, 0.33, 0.06), 2.5)), Vector3(0, -0.18, 0.53))
 
+var _tank_wrap: Node3D = null # 坦克 GLB 朝向节点（update 里随 _facing 转整车）
+var _tank_anim: AnimationPlayer = null
+
 func _build_tank() -> void:
-	# Dogra 重装甲扫讨车：卡车式车体 + 六轮 + 前部发光核心（弱点意象）
+	# Dogra 重装甲扫讨车 → Quaternius 坦克（CC0，带骨骼行进动画）：
+	# 原生车长 17.68 沿 X、车头在 -X：×0.30 缩放 + rotY 90° 转到 +Z，按实测 AABB 居中贴地
 	_model = Node3D.new()
 	add_child(_model)
-	var hull_m := _pbr(Color(0.5, 0.52, 0.46), 0.5, 0.65, "metal")
-	Util.box(_model, Vector3(2.5, 1.15, 4.0), hull_m, Vector3(0, 1.05, 0))
-	Util.box(_model, Vector3(2.7, 0.55, 4.3), _pbr(Color(0.2, 0.2, 0.23), 0.6, 0.5), Vector3(0, 0.32, 0))
-	var wheel_m := _pbr(Color(0.08, 0.08, 0.09), 0.7, 0.3)
-	for sx in [-1.15, 1.15]:
-		for wz in [-1.45, 0, 1.45]:
-			var wheel := Util.cyl(_model, 0.42, 0.42, 0.24, wheel_m, Vector3(sx, 0.42, wz), 12)
-			wheel.rotation.z = PI / 2.0
-	_head = Node3D.new()
-	_head.position = Vector3(0, 1.95, -0.6)
+	_tank_wrap = Node3D.new()
+	_tank_wrap.rotation.y = PI / 2.0
+	_tank_wrap.scale = Vector3.ONE * 0.30
+	_model.add_child(_tank_wrap)
+	var inst: Node3D = (load("res://assets/vehicles/tank.glb") as PackedScene).instantiate()
+	inst.position = Vector3(1.466, 0.013, -2.587)
+	_tank_wrap.add_child(inst)
+	_head = Node3D.new() # 占位：炮塔随整车朝向（update 对 _head 的赋值无害）
+	_head.position = Vector3(0, 1.6, 0)
 	_model.add_child(_head)
-	Util.box(_head, Vector3(1.5, 0.65, 1.3), _pbr(Color(0.45, 0.4, 0.52), 0.5, 0.6, "metal"), Vector3.ZERO)
-	var barrel := Util.cyl(_head, 0.13, 0.13, 1.5, _pbr(Color(0.1, 0.1, 0.1), 0.4, 0.8), Vector3(0, 0, 1.2))
-	barrel.rotation.x = PI / 2.0
-	Util.sph(_model, 0.3, _reg_mat(Util.glow(Color(1, 0.2, 0.1), 3.0)), Vector3(0, 1.05, 2.05), 12, 9)
+	_tank_anim = _find_anim(inst)
+	if _tank_anim:
+		for n in _tank_anim.get_animation_list():
+			if n.contains("Forward"):
+				_tank_anim.get_animation(n).loop_mode = Animation.LOOP_LINEAR
+				_tank_anim.play(n)
+	_collect_flash_mats()
+	Util.sph(_model, 0.16, _reg_mat(Util.glow(Color(1, 0.2, 0.1), 3.0)), Vector3(0, 1.0, 2.45), 12, 9) # 核心球收敛（0.3→0.16，位置/判定不变）
 
 func _build_hp_bar() -> void:
 	_hp_w = 3.4 if type == "tank" else 1.15
@@ -381,10 +542,38 @@ func _build_hp_bar() -> void:
 	_hp_bar.visible = false
 	add_child(_hp_bar)
 
+## 受伤/死亡表现分型：人形出血、孢子喷绿浆、机械冒火花、石像掉碎石
+func _fx_kind() -> String:
+	match type:
+		"spore":
+			return "goo"
+		"statue":
+			return "rock"
+		"turret", "tank", "roller":
+			return "spark"
+		_:
+			return "blood"
+
 func on_hit(dmg: int, _point: Vector3 = Vector3.ZERO) -> void:
 	if not alive:
 		return
+	# 盾牌兵正面拦截：玩家子弹的命中点带真实落点，落在盾面正面 ±65° 内被挡下（火花、无伤）；
+	# 侧/背命中照常受伤；油桶爆炸等以「敌人自身中心」为命中点的全向伤害水平偏移≈0，不拦截。
+	if type == "shield" and _point != Vector3.ZERO:
+		var to_hit := Vector3(_point.x - global_position.x, 0.0, _point.z - global_position.z)
+		if to_hit.length() > 0.05:
+			var fwd := Vector3(sin(rotation.y), 0.0, cos(rotation.y))
+			if to_hit.normalized().dot(fwd) > 0.42:
+				_alert = true # 被打仍警觉（知道有人在正面开火）
+				var prs = _ctx.get("projectiles")
+				if prs:
+					prs.spawn_hit_fx(_point, "spark")
+				return
+	_alert = true # 挨打即交战（哪怕没看见人）
 	hp -= dmg
+	var pr = _ctx.get("projectiles")
+	if pr and _point != Vector3.ZERO:
+		pr.spawn_hit_fx(_point, _fx_kind()) # 分型沿用 _fx_kind，只换表现层为贴图粒子
 	_flash_t = 0.08
 	for m in _flash_mats:
 		if m is StandardMaterial3D:
@@ -399,6 +588,21 @@ func on_hit(dmg: int, _point: Vector3 = Vector3.ZERO) -> void:
 func _die() -> void:
 	alive = false
 	AudioSys.play("die", -6.0, randf_range(0.9, 1.1))
+	# 死亡残留：血泊/绿浆留在原地（独立节点，不随尸体回收消失）；机械爆一团火并留焦痕
+	var pr2 = _ctx.get("projectiles")
+	if pr2:
+		var feet := global_position + Vector3(0, 0.045, 0)
+		match _fx_kind():
+			"blood":
+				pr2.spawn_pool(feet, Color(0.35, 0.02, 0.02), randf_range(0.5, 0.72))
+			"goo":
+				pr2.spawn_pool(feet, Color(0.15, 0.4, 0.08), 0.5)
+			"spark":
+				if type == "turret" or type == "tank":
+					pr2.spawn_explosion_fx(global_position + Vector3(0, 0.8, 0), 1.7)
+				pr2.spawn_pool(feet, Color(0.05, 0.05, 0.05), 0.95, 20.0)
+			"rock":
+				pr2.spawn_hit_fx(global_position + Vector3(0, 1.0, 0), "rock")
 	if not _scored:
 		_scored = true
 		_ctx["on_score"].call(score_value)
@@ -429,19 +633,26 @@ func _fire_orb(player, speed: float, height: float, inacc: float) -> void:
 		player.global_position.x + randf_range(-inacc, inacc),
 		player.chest_y() + randf_range(-0.15, 0.25),
 		player.global_position.z + randf_range(-inacc, inacc))
-	_ctx["projectiles"].spawn_orb(from, (target - from).normalized(), speed, 1)
+	var dirv := (target - from).normalized()
+	_ctx["projectiles"].spawn_orb(from, dirv, speed, 1)
+	# 开火反馈：枪口火光面片 + 向右抛壳（纯表现，走代码枪口点位与既定妥协一致）
+	_ctx["projectiles"].spawn_muzzle_flash(from, dirv, 0.85)
+	_ctx["projectiles"].spawn_shell(from + Vector3(0, -0.04, 0), Vector3(-dirv.z, 0, dirv.x))
 	AudioSys.play("enemy_shoot", -10.0)
 
-func _fire_grenade(player, from_h: float = 1.1) -> void:
+func _fire_grenade(player, from_h: float = 1.1, flight: float = 1.35) -> void:
 	_react("Pistol_Shoot", 0.26)
 	var from := _muzzle_pos(from_h)
-	var t := 1.35
+	var t := flight
 	var g := 16.0
 	var vel := Vector3(
 		(player.global_position.x - from.x) / t,
 		((player.global_position.y + 0.3 - from.y) + 0.5 * g * t * t) / t,
 		(player.global_position.z - from.z) / t)
 	_ctx["projectiles"].spawn_grenade(from, vel)
+	# 迫击炮发射反馈：大号炮口火光 + 一团发射烟
+	_ctx["projectiles"].spawn_muzzle_flash(from, vel.normalized(), 1.7)
+	_ctx["projectiles"].spawn_smoke_puff(from)
 	AudioSys.play("enemy_shoot", -8.0)
 
 ## 返回 true 表示可回收
@@ -454,6 +665,15 @@ func update_enemy(dt: float, player, camera_pos: Vector3) -> bool:
 			rotation.x = (1.0 - k) * PI / 2.0 * 0.9
 			global_position.y = _base_y - (1.0 - k) * 0.35
 		return _death_t <= 0.0
+	# 远处降频：距玩家 >110m 的敌人每 0.3 秒批量步进一次，保开放世界帧率（死亡走逐帧分支不受影响）
+	var pdx: float = player.global_position.x - global_position.x
+	var pdz: float = player.global_position.z - global_position.z
+	if pdx * pdx + pdz * pdz > 12100.0:
+		_dormant += dt
+		if _dormant < 0.3:
+			return false
+		dt = _dormant
+		_dormant = 0.0
 	_t += dt
 	if _react_t > 0.0:
 		_react_t -= dt
@@ -472,28 +692,84 @@ func update_enemy(dt: float, player, camera_pos: Vector3) -> bool:
 	var dist := sqrt(dx * dx + dz * dz)
 	_facing = atan2(dx, dz)
 
+	# 视线交战：错峰复核视线，看见（射程 1.25 倍内）/贴近/挨打才交战；直射开火还要当帧视线无遮挡
+	_los_t -= dt
+	if _los_t <= 0.0:
+		_los_t = 0.22 + randf() * 0.1
+		_los_ok = _compute_los(player)
+		if _los_ok and dist < float(_data.get("range", 30.0)) * 1.25:
+			_alert = true
+	if dist < 9.0 and player.alive:
+		_alert = true
+	# 警觉表现：刚发现玩家时「！」弹出 0.85 秒；未交战的站桩射手在营地里巡逻走动
+	if _alert and not _was_alert:
+		_alert_t = 0.85
+	_was_alert = _alert
+	if _alert_icon:
+		_alert_t = maxf(0.0, _alert_t - dt)
+		_alert_icon.visible = _alert_t > 0.0
+		if _alert_icon.visible:
+			_alert_icon.scale = Vector3.ONE * (1.0 + 0.6 * maxf(0.0, _alert_t - 0.55) / 0.3)
+	if not _alert and type in ["rifleman", "sniper", "mortar", "garth", "langel", "bomber", "shield"]:
+		_patrol(dt)
+	# 射手上身俯仰：上身随目标高低俯仰（朝上/朝下打都成立，不再只有平射）
+	if _aim_mod_e:
+		var elev := 0.0
+		if _alert and dist > 0.5:
+			elev = clampf(atan2(player.chest_y() - (global_position.y + 1.3), dist), -0.55, 0.55)
+		_aim_mod_e.pitch = lerpf(_aim_mod_e.pitch, elev * 0.75, minf(1.0, dt * 8.0))
+
 	match type:
 		"rifleman", "garth", "langel":
-			_face_player()
+			if _alert:
+				_face_player()
 			_fire_timer -= dt
-			if _fire_timer <= 0.0 and dist < float(_data["range"]) and player.alive:
+			if _fire_timer <= 0.0 and dist < float(_data["range"]) and player.alive and _alert and _los_ok:
 				_fire_timer = float(_data["fire_interval"]) * randf_range(0.85, 1.2)
 				_fire_orb(player, float(_data["orb_speed"]), 1.25, 0.5)
 		"sniper":
-			_face_player()
+			if _alert:
+				_face_player()
 			_fire_timer -= dt
-			if _fire_timer <= 0.0 and dist < float(_data["range"]) and player.alive:
+			if _fire_timer <= 0.0 and dist < float(_data["range"]) and player.alive and _alert and _los_ok:
 				_fire_timer = float(_data["fire_interval"])
 				_fire_orb(player, float(_data["orb_speed"]), 1.3, 0.25)
 		"mortar":
-			_face_player()
+			if _alert:
+				_face_player()
 			_fire_timer -= dt
-			if _fire_timer <= 0.0 and dist < float(_data["range"]) and player.alive:
+			if _fire_timer <= 0.0 and dist < float(_data["range"]) and player.alive and _alert:
 				_fire_timer = float(_data["fire_interval"]) * randf_range(0.9, 1.15)
 				_fire_grenade(player)
+		"bomber":
+			# 掷弹兵：中距离站位手掷雷（飞行 1.0s 的低弧线），与迫击炮同走榴弹链（弧线越掩体，不查直射视线）
+			if _alert:
+				_face_player()
+			_fire_timer -= dt
+			if _fire_timer <= 0.0 and dist < float(_data["range"]) and player.alive and _alert:
+				_fire_timer = float(_data["fire_interval"]) * randf_range(0.9, 1.15)
+				_fire_grenade(player, 1.35, 1.0)
+		"shield":
+			# 盾牌兵：举盾缓步逼近到 11m 内停步，偶尔从盾后开火（正面子弹被盾挡，见 on_hit）
+			if _alert:
+				_face_player()
+				if dist > 11.0 and player.alive:
+					var sp2 := float(_data.get("speed", 2.2))
+					global_position.x += dx / dist * sp2 * dt
+					global_position.z += dz / dist * sp2 * dt
+					var lv4 = _ctx.get("level")
+					if lv4:
+						global_position.y = lv4.get_support_y(global_position.x, global_position.z, global_position.y)
+					_play_e("Walk")
+				else:
+					_play_e(_stance_clip)
+				_fire_timer -= dt
+				if _fire_timer <= 0.0 and dist < float(_data["range"]) and player.alive and _los_ok:
+					_fire_timer = float(_data["fire_interval"]) * randf_range(0.9, 1.15)
+					_fire_orb(player, float(_data["orb_speed"]), 1.25, 0.5)
 		"statue":
 			_fire_timer -= dt
-			if _fire_timer <= 0.0 and dist < float(_data["range"]) and player.alive:
+			if _fire_timer <= 0.0 and dist < float(_data["range"]) and player.alive and _alert:
 				_fire_timer = float(_data["fire_interval"]) * randf_range(0.9, 1.2)
 				_fire_grenade(player, 2.1)
 		"akbar":
@@ -501,7 +777,7 @@ func update_enemy(dt: float, player, camera_pos: Vector3) -> bool:
 		"turret":
 			if _head:
 				_head.rotation.y = _facing - rotation.y
-			if dist < float(_data["range"]) and player.alive:
+			if dist < float(_data["range"]) and player.alive and _alert and _los_ok:
 				if _burst_left > 0:
 					_fire_timer -= dt
 					if _fire_timer <= 0.0:
@@ -516,18 +792,28 @@ func update_enemy(dt: float, player, camera_pos: Vector3) -> bool:
 		"runner", "spore":
 			_face_player()
 			var melee_r := float(_data.get("melee_range", 1.6))
-			if dist > melee_r and player.alive:
+			if _alert and dist > melee_r and player.alive:
 				var sp := float(_data.get("speed", 5.0))
 				global_position.x += dx / dist * sp * dt
 				global_position.z += dz / dist * sp * dt
-			elif player.alive and _melee_timer <= 0.0:
+				# 移动贴地：跟着地形起伏走，不再平地滑行穿山
+				var lv2 = _ctx.get("level")
+				if lv2:
+					if type == "spore":
+						_base_y = lv2.get_support_y(global_position.x, global_position.z, _base_y)
+					else:
+						global_position.y = lv2.get_support_y(global_position.x, global_position.z, global_position.y)
+			elif _alert and player.alive and _melee_timer <= 0.0:
 				_melee_timer = float(_data.get("melee_cooldown", 0.9))
 				player.take_damage(1)
 		"roller":
-			if player.alive and dist > 0.01:
+			if _alert and player.alive and dist > 0.01:
 				var sp := float(_data["speed"])
 				global_position.x += dx / dist * sp * dt
 				global_position.z += dz / dist * sp * dt
+				var lv3 = _ctx.get("level")
+				if lv3:
+					global_position.y = lv3.get_support_y(global_position.x, global_position.z, global_position.y)
 			if _roller_ball:
 				_roller_ball.rotation.x -= dt * 9.0
 			if dist < float(_data["explode_range"]) and player.alive:
@@ -538,18 +824,20 @@ func update_enemy(dt: float, player, camera_pos: Vector3) -> bool:
 				_die()
 		"tank":
 			global_position.x = _base_x + sin(_t * 0.45) * 6.0
+			if _tank_wrap:
+				_tank_wrap.rotation.y = PI / 2.0 + _facing - rotation.y
 			_face_player()
 			if _head:
 				_head.rotation.y = _facing - rotation.y
 			_fire_timer -= dt
-			if _fire_timer <= 0.0 and dist < float(_data["range"]) and player.alive:
+			if _fire_timer <= 0.0 and dist < float(_data["range"]) and player.alive and _alert and _los_ok:
 				_fire_timer = float(_data["fire_interval"])
 				for i in [-1, 0, 1]:
 					var from := _muzzle_pos(1.8)
 					var dir := Vector3(dx, player.chest_y() - from.y, dz).normalized()
 					var right := Vector3(-dir.z, 0, dir.x)
 					dir = (dir + right * i * 0.12).normalized()
-					_ctx["projectiles"].spawn_orb(from, dir, float(_data["orb_speed"]), 1)
+					_ctx["projectiles"].spawn_orb(from, dir, float(_data["orb_speed"]), 1, 2.0) # 坦克炮弹=重弹：命中播爆炸视觉
 				AudioSys.play("enemy_shoot", -8.0)
 
 	hit_x = global_position.x
@@ -572,10 +860,59 @@ func update_enemy(dt: float, player, camera_pos: Vector3) -> bool:
 				_hp_bar.look_at(camera_pos, Vector3.UP)
 	return false
 
+func _play_e(clip: String) -> void:
+	if _anim and clip != "" and _react_t <= 0.0 and _anim.current_animation != clip:
+		_anim.play(clip, 0.15)
+
+## 营地巡逻：未交战时在出生点周围慢速往返（走两步、停一停），世界是活的不是靶场
+func _patrol(dt: float) -> void:
+	_patrol_t -= dt
+	if _patrol_moving:
+		var to := _patrol_dest - global_position
+		to.y = 0.0
+		var d := to.length()
+		if d < 0.4 or _patrol_t <= 0.0:
+			_patrol_moving = false
+			_patrol_t = randf_range(1.2, 3.2)
+			_play_e(_stance_clip)
+		else:
+			var dir := to / d
+			global_position.x += dir.x * 1.35 * dt
+			global_position.z += dir.z * 1.35 * dt
+			var lv = _ctx.get("level")
+			if lv:
+				global_position.y = lv.get_support_y(global_position.x, global_position.z, global_position.y)
+			rotation.y = atan2(dir.x, dir.z)
+			_play_e("Walk")
+	elif _patrol_t <= 0.0:
+		_patrol_moving = true
+		_patrol_t = randf_range(2.0, 3.6)
+		var a := randf() * TAU
+		var r := randf_range(1.5, 4.2)
+		_patrol_dest = _home + Vector3(cos(a) * r, 0.0, sin(a) * r)
+
+## 视线复核：眼睛点 → 玩家胸口，地形隆起与实体掩体都会挡（关卡提供 has_los）
+func _compute_los(player) -> bool:
+	var lvl = _ctx.get("level")
+	if lvl == null or player == null or not player.alive:
+		return false
+	var eye_h := 1.45
+	if type == "turret":
+		eye_h = 1.2
+	elif type == "statue":
+		eye_h = 2.4
+	elif type == "tank":
+		eye_h = 2.0
+	elif type == "akbar":
+		eye_h = 0.6
+	var eye := global_position + Vector3(0, eye_h, 0)
+	var tgt := Vector3(player.global_position.x, player.chest_y(), player.global_position.z)
+	return lvl.has_los(eye, tgt)
+
 func _face_player() -> void:
 	if type != "turret" and type != "tank":
-		rotation.y = _facing + PI if HUMANOID.has(type) else _facing
-	# GLB 士兵在 Godot 里朝 -Z（引擎约定），故人型兵偏 π；自建模型朝 +Z 不偏
+		rotation.y = _facing
+	# 新 GLB 士兵在 Godot 里朝 +Z（与自建模型同约定），不再偏 π（旧 UAL 朝 -Z 才需要）
 
 func _update_akbar(dt: float, player, dist: float) -> void:
 	_ak_timer -= dt

@@ -54,7 +54,10 @@ func _on_frame() -> void:
 			Input.action_release("move_forward")
 			var dist: float = _main.current_level.player_dist(_main.player)
 			_check(dist > 12.0, "前进推进 %.1fm" % dist)
-			_check(_main.current_level.enemies.size() > 0, "分段刷怪已触发 (%d)" % _main.current_level.enemies.size())
+			# 期望值从数据层现算（spawns 条数 + mid_tank）：旧口径 25 是误把 coverage 自带的
+			# 12 个测试敌人算进了关卡预置数（17 预置 + 12 测试 = 29），关卡本身只有 17 个
+			var preset: int = (Data.LEVELS[0]["spawns"] as Array).size() + (1 if Data.LEVELS[0].has("mid_tank") else 0)
+			_check(_main.current_level.enemies.size() == preset, "敌人开局全量预置 (%d/%d)" % [_main.current_level.enemies.size(), preset])
 			_main.player.fire_timer = 0.0
 			_check(_main.player.try_shoot(_main.projectiles, _main.player.global_position + Vector3(0, 1.2, -30)), "射击成功")
 			# 直接击杀一名敌人验证计分链
@@ -67,7 +70,7 @@ func _on_frame() -> void:
 			# 第二关电网门
 			_main._load_level(1)
 			_main._advance_dialog()
-			_check(_main.current_level.sensors.size() == 3, "基地电网门×3")
+			_check(_main.current_level.sensors.size() == (Data.LEVELS[1]["gates"] as Array).size(), "基地电网门×%d" % (Data.LEVELS[1]["gates"] as Array).size())
 			var s = _main.current_level.sensors[0]
 			s.on_hit(9999)
 			_check(not s.alive, "感应器可击毁")
@@ -77,7 +80,7 @@ func _on_frame() -> void:
 			_main._load_level(0)
 			_main._advance_dialog()
 			_main.player.barrier = 9999.0
-			_main.player.global_position = Vector3(0, 0, -(190.0 - 5.0) + 26.0)
+			_main.player.global_position = Vector3(0, 0, 26.0 - (_main.current_level.length - 5.0))
 			_wait(40)
 		4:
 			_check(_main.current_level.boss_activated, "Boss 竞技场触发")
