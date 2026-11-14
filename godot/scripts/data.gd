@@ -5,7 +5,7 @@ extends RefCounted
 ## 关卡：玩家从 z=26 向 -Z 推进；spawns=[推进米数, 类型, 横向偏移]
 
 ## 版本号单一出处：主菜单显示它，每次发版只改这一处
-const VERSION := "1.2.0"
+const VERSION := "1.2.1"
 
 const PLAYER := {
 	"height": 1.7, "prone_height": 0.55, "radius": 0.38,
