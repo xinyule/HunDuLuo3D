@@ -70,6 +70,21 @@ var level_index := 0
 var width := 20.0
 var length := 200.0
 var colliders: Array = []
+# ---- 1.2.1 性能：碰撞体空间索引（8m 网格分桶）----
+# 旧口径 has_los/get_support_y/_point_blocked/_collider_at 全部遍历 colliders 全表
+# （单次 90–5500μs，是帧时头号热点）。索引只缩小候选集：每条查询的逐体判定式与
+# 全表版逐字相同、归约（任一命中/取最大）与顺序无关，结果等价。
+# 注册时 AABB 外扩 _COL_PAD（≥各消费方的最大外扩：_point_blocked 0.45 / 相机 0.35），
+# 点查询只取所在格候选即为全表命中的超集；跨度过大的碰撞体（落闸全宽墙等）进
+# _col_big 常驻扫描，避免单体灌满整行格子。disabled 是活标记（字典引用直读），
+# 只有新增碰撞体才置脏重建（_add_collider 时），重建成本 ~200 体可忽略。
+const _COL_CELL := 8.0
+const _COL_PAD := 1.0
+var _col_grid: Dictionary = {} # Vector2i -> Array[Dictionary]
+var _col_big: Array = []
+var _col_dirty := true
+var _alert_list: Array = [] # 每帧维护的警觉敌人表（战术分散站位只遍历它，不再全表扫）
+var far_anim_simple := true # 设置「远敌动画」：true=简化（>70m 冻结骨骼动画）；main 可即时改写
 var enemies: Array = []
 var sensors: Array = []
 var barrels: Array = []
@@ -98,6 +113,7 @@ var _enemy_dt_scale := 1.0
 ## 画质分档：草量倍率（建关时按 ctx 的 quality 定；贴图分辨率不动）
 var _grass_scale := 1.0
 var _quality := "high"
+var _shadow_mode := "mid" # 设置「阴影」档：off/mid/high（距离与贴图封顶对应见 main.gd 注释）
 # ---- 环境互动（油桶连锁/落叶/雪地脚印/草让开）----
 var _tree_targets: Array = []
 var _pending_booms: Array = [] # {t, bt}：连锁引爆延迟队列
@@ -109,6 +125,7 @@ var _fp_next := 0
 var _trackers: Dictionary = {} # 实例 id -> {lpos, acc, side}：脚印步距跟踪
 var _grass_mm: MultiMesh = null
 var _grass_base: Array = []
+var _grass_cells: Dictionary = {} # Vector2i(4m 格) -> Array[int] 草株序号（弯曲更新邻近扫）
 var _grass_bent: Dictionary = {}
 var _grass_timer := 0.0
 
@@ -140,7 +157,10 @@ func setup(p_data: Dictionary, p_index: int, ctx: Dictionary) -> void:
 	_ctx = ctx
 	_enemy_dt_scale = {"easy": 0.8, "normal": 1.0, "hard": 1.25}.get(String(ctx.get("difficulty", "normal")), 1.0)
 	_quality = String(ctx.get("quality", "high"))
-	_grass_scale = {"low": 0.45, "mid": 0.75, "high": 1.0}.get(_quality, 1.0)
+	# 1.2.1：草量/阴影/远敌动画改为设置直传（ctx 缺项时回退旧画质推导，探针旧口径不破）
+	_grass_scale = float(ctx.get("grass_scale", {"low": 0.45, "mid": 0.75, "high": 1.0}.get(_quality, 1.0)))
+	_shadow_mode = String(ctx.get("shadow", {"low": "off", "mid": "mid", "high": "high"}.get(_quality, "mid")))
+	far_anim_simple = String(ctx.get("far_anim", "simple")) != "full"
 	width = float(data["width"])
 	length = float(data["length"])
 	pickups = PickupSystem.new()
@@ -300,7 +320,80 @@ func _slope_grad(x: float, z: float) -> float:
 	var gz := (terrain_h(x, z + e) - terrain_h(x, z - e)) / (2.0 * e)
 	return sqrt(gx * gx + gz * gz)
 
+## 碰撞体 XZ 包围盒 [minx, minz, maxx, maxz]（box 用 w/d、circle 用 r；含 _COL_PAD 外扩）
+func _col_aabb(c: Dictionary) -> Array:
+	var cx := float(c.get("x", 0.0))
+	var cz := float(c.get("z", 0.0))
+	var hx: float
+	var hz: float
+	if c.get("type") == "circle":
+		hx = float(c.get("r", 1.0))
+		hz = hx
+	else:
+		hx = float(c.get("w", 1.0)) * 0.5
+		hz = float(c.get("d", 1.0)) * 0.5
+	return [cx - hx - _COL_PAD, cz - hz - _COL_PAD, cx + hx + _COL_PAD, cz + hz + _COL_PAD]
+
+func _col_cell_of(x: float, z: float) -> Vector2i:
+	return Vector2i(floori(x / _COL_CELL), floori(z / _COL_CELL))
+
+func _ensure_col_index() -> void:
+	if not _col_dirty:
+		return
+	_col_dirty = false
+	_col_grid.clear()
+	_col_big.clear()
+	for i in colliders.size():
+		colliders[i]["_ci"] = i # 插入序号：区域去重与「首个命中」语义的依据
+		var c: Dictionary = colliders[i]
+		var bb: Array = _col_aabb(c)
+		var c0 := _col_cell_of(float(bb[0]), float(bb[1]))
+		var c1 := _col_cell_of(float(bb[2]), float(bb[3]))
+		if c1.x - c0.x > 5 or c1.y - c0.y > 5:
+			_col_big.append(c) # 跨度过大：常驻扫描（全关只有落闸墙/长墙几条）
+			continue
+		for gx in range(c0.x, c1.x + 1):
+			for gz in range(c0.y, c1.y + 1):
+				var key := Vector2i(gx, gz)
+				if not _col_grid.has(key):
+					_col_grid[key] = []
+				(_col_grid[key] as Array).append(c)
+
+## 点查询候选集：所在格桶 + 大跨度常驻体。桶内保持 colliders 插入序
+## （重建时按全表顺序追加），_collider_at 依赖的「首个命中」语义不变。
+func colliders_at(x: float, z: float) -> Array:
+	_ensure_col_index()
+	var out: Array = []
+	var bucket: Array = _col_grid.get(_col_cell_of(x, z), [])
+	out.append_array(bucket)
+	out.append_array(_col_big)
+	return out
+
+## 区域查询候选集（AABB 与 [minx,minz,maxx,maxz] 相交的格子并集，去重保序）：
+## 供掩体检索/子弹目标宽相等需要「一片区域内的碰撞体」的场景。
+func colliders_in_box(minx: float, minz: float, maxx: float, maxz: float) -> Array:
+	_ensure_col_index()
+	var out: Array = []
+	var seen := {}
+	var c0 := _col_cell_of(minx, minz)
+	var c1 := _col_cell_of(maxx, maxz)
+	for gx in range(c0.x, c1.x + 1):
+		for gz in range(c0.y, c1.y + 1):
+			var bucket: Array = _col_grid.get(Vector2i(gx, gz), [])
+			for c in bucket:
+				var key := int((c as Dictionary).get("_ci", -1))
+				if not seen.has(key):
+					seen[key] = true
+					out.append(c)
+	for c in _col_big:
+		var key2 := int((c as Dictionary).get("_ci", -1))
+		if not seen.has(key2):
+			seen[key2] = true
+			out.append(c)
+	return out
+
 ## 视线判定：地形或实体碰撞体挡住即无视线（双方开火都以它为准）
+## 1.2.1：内层改点候选集（colliders_at）——判定式与全表版逐字相同，结果等价。
 func has_los(a: Vector3, b: Vector3) -> bool:
 	var d := a.distance_to(b)
 	var steps := int(d / 2.5)
@@ -308,7 +401,7 @@ func has_los(a: Vector3, b: Vector3) -> bool:
 		var p := a.lerp(b, float(i) / float(steps))
 		if terrain_h(p.x, p.z) > p.y + 0.3:
 			return false
-		for c in colliders:
+		for c in colliders_at(p.x, p.z):
 			if c.get("disabled", false) or c.get("no_collide", false):
 				continue
 			var y0 := float(c.get("y0", 0.0))
@@ -327,7 +420,7 @@ func has_los(a: Vector3, b: Vector3) -> bool:
 
 func get_support_y(x: float, z: float, from_y: float) -> float:
 	var best := terrain_h(x, z)
-	for c in colliders:
+	for c in colliders_at(x, z):
 		if c.get("disabled", false) or c.get("no_collide", false):
 			continue
 		var top := float(c.get("y0", 0.0)) + float(c.get("h", 6.0))
@@ -347,6 +440,7 @@ func get_support_y(x: float, z: float, from_y: float) -> float:
 # ---------------- 建造 ----------------
 func _add_collider(c: Dictionary) -> Dictionary:
 	colliders.append(c)
+	_col_dirty = true # 空间索引懒重建（见 _ensure_col_index）
 	return c
 
 func _add_box(x: float, z: float, w: float, d: float, h: float, mat: Material, y0: float = 0.0, with_collider: bool = true) -> MeshInstance3D:
@@ -398,13 +492,29 @@ func _stage_terrain() -> void:
 	_sun = DirectionalLight3D.new()
 	_sun.light_energy = float(env_data.get("sun_energy", 1.05)) # 可选：逐关日光强弱（背景去重差异化，1.1.0）
 	_sun.light_color = Color.html("#%06x" % int(env_data["sun_color"])) if env_data.has("sun_color") else Color(1, 0.97, 0.9)
-	_sun.shadow_enabled = true
 	_sun.directional_shadow_mode = DirectionalLight3D.SHADOW_ORTHOGONAL
-	_sun.directional_shadow_max_distance = 120.0 if _quality == "high" else 70.0
-	_sun.shadow_enabled = _quality != "low" # 低档关阴影（画质分档）
 	_sun.rotation_degrees = Vector3(-52, -28, 0)
 	add_child(_sun)
+	apply_shadow_mode(_shadow_mode)
 	_build_ground_and_walls()
+
+## 设置「阴影」档即时生效（灯光属性运行时可改）：
+## off=关阴影；mid=距离 70m；high=距离 120m。阴影贴图尺寸全局封顶 2048
+## （project.godot rendering/lights_and_shadows/directional_shadow/size，出厂引擎级参数），
+## 两档共用该封顶、只差距离——封顶对帧时的影响远大于距离档差。
+func apply_shadow_mode(mode: String) -> void:
+	_shadow_mode = mode
+	if not is_instance_valid(_sun):
+		return
+	match mode:
+		"off":
+			_sun.shadow_enabled = false
+		"high":
+			_sun.shadow_enabled = true
+			_sun.directional_shadow_max_distance = 120.0
+		_:
+			_sun.shadow_enabled = true
+			_sun.directional_shadow_max_distance = 70.0
 
 func _stage_theme() -> void:
 	match String(data["theme"]):
@@ -538,25 +648,37 @@ void fragment() {
 	vec2 uv = wpos.xz / 6.0;
 	float steep = smoothstep(0.18, 0.42, 1.0 - wnormal.y);
 	vec3 flat_c = texture(tex_flat, uv).rgb * tint_flat.rgb;
-	// 岩石三平面采样（尺度 /3 比平地更密）：近垂直壁面不再被 xz 投影拉成竖条滑梯纹
-	vec3 rock_c = vec3(0.0);
-	if (steep > 0.002) {
+	vec3 flat_n = texture(tex_flat_n, uv).rgb;
+	float det = texture(tex_detail, wpos.xz / 0.8).r;
+	vec3 col;
+	vec3 nmap;
+	float ndepth;
+	if (steep <= 0.002) {
+		// 平地便宜路径（1.2.1 降本）：旧版在纯平地仍采样岩石法线并做 mix，
+		// 结果恒等于平地值（mix 因子 0），纯属浪费采样。此分支输出与旧版逐位
+		// 一致，只省掉岩石法线采样；过渡带与陡坡仍走下方完整三平面路径。
+		col = flat_c;
+		nmap = flat_n;
+		ndepth = 1.0;
+	} else {
+		// 岩石三平面采样（尺度 /3 比平地更密）：近垂直壁面不再被 xz 投影拉成竖条滑梯纹
 		vec3 bw = pow(abs(wnormal), vec3(4.0));
 		bw /= (bw.x + bw.y + bw.z);
-		rock_c = (texture(tex_rock, wpos.zy / 3.0).rgb * bw.x
+		vec3 rock_c = (texture(tex_rock, wpos.zy / 3.0).rgb * bw.x
 			+ texture(tex_rock, wpos.xz / 3.0).rgb * bw.y
 			+ texture(tex_rock, wpos.xy / 3.0).rgb * bw.z) * tint_rock.rgb;
+		col = mix(flat_c, rock_c, steep);
+		nmap = mix(flat_n, texture(tex_rock_n, uv).rgb, steep);
+		ndepth = mix(1.0, 1.7, steep);
 	}
-	vec3 col = mix(flat_c, rock_c, steep);
-	float det = texture(tex_detail, wpos.xz / 0.8).r;
 	col *= 0.82 + det * 0.36;
 	if (wet_band > 0.5) {
 		float wet = smoothstep(0.35, -0.3, wpos.y);
 		col = mix(col, col * vec3(0.45, 0.42, 0.4), wet * 0.75);
 	}
 	ALBEDO = col;
-	NORMAL_MAP = mix(texture(tex_flat_n, uv).rgb, texture(tex_rock_n, uv).rgb, steep);
-	NORMAL_MAP_DEPTH = mix(1.0, 1.7, steep);
+	NORMAL_MAP = nmap;
+	NORMAL_MAP_DEPTH = ndepth;
 	ROUGHNESS = 0.95;
 	SPECULAR = 0.25;
 }
@@ -835,6 +957,14 @@ func _grass_field(count: int, snow: bool, seed_v: int) -> void:
 		mm.set_instance_transform(i, transforms[i])
 	_grass_mm = mm # 供「穿草让开」逐株回写
 	_grass_base = transforms
+	# 1.2.1：草株按 4m 格分桶——弯曲更新只扫玩家邻近格（旧口径每 0.12s 全扫约 2600 株 ≈ 540μs）
+	_grass_cells.clear()
+	for gi in transforms.size():
+		var o := (transforms[gi] as Transform3D).origin
+		var gk := Vector2i(floori(o.x / 4.0), floori(o.z / 4.0))
+		if not _grass_cells.has(gk):
+			_grass_cells[gk] = []
+		(_grass_cells[gk] as Array).append(gi)
 	var mmi := MultiMeshInstance3D.new()
 	mmi.multimesh = mm
 	mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
@@ -852,6 +982,7 @@ func _fern(x: float, z: float, rand: RandomNumberGenerator) -> void:
 	f.rotation.y = rand.randf() * TAU
 	f.scale = Vector3.ONE * rand.randf_range(1.1, 1.9)
 	add_child(f)
+	_vis_range(f, 130.0)
 
 var _grass_mat_c: Material = null
 var _gfield_mat: Material = null
@@ -904,6 +1035,7 @@ func _grass(x: float, z: float, rand: RandomNumberGenerator) -> void:
 	card.material_override = _grass_mat()
 	card.scale = Vector3(1.0, h / 0.9, 1.0)
 	card.rotation.y = rand.randf_range(-0.3, 0.3)
+	card.visibility_range_end = 110.0 # 远景剔除（1.2.1）：小草丛远了不画
 	pivot.add_child(card)
 	_sway.append({"pivot": pivot, "phase": rand.randf() * TAU})
 
@@ -1067,6 +1199,14 @@ func _rock_variant(rand: RandomNumberGenerator) -> ArrayMesh:
 			_rock_variants.append(_noisy_rock_mesh(sv))
 	return _rock_variants[rand.randi_range(0, _rock_variants.size() - 1)]
 
+## 远景剔除（1.2.1）：静态小道具超过 end 米不绘制——只影响渲染，
+## 碰撞体/AI 掩体登记照旧（躲在 200m 外岩石后的判定不依赖看不看得见）。
+func _vis_range(n: Node, end: float) -> void:
+	if n is GeometryInstance3D:
+		(n as GeometryInstance3D).visibility_range_end = end
+	for ch in n.get_children():
+		_vis_range(ch, end)
+
 func _boulder(x: float, z: float, rand: RandomNumberGenerator) -> void:
 	var base_y := get_support_y(x, z, 999.0)
 	var n := rand.randi_range(2, 3)
@@ -1082,6 +1222,7 @@ func _boulder(x: float, z: float, rand: RandomNumberGenerator) -> void:
 		rock.scale = Vector3(s * rand.randf_range(1.0, 1.35), s * rand.randf_range(0.6, 0.85), s * rand.randf_range(0.9, 1.2))
 		rock.rotation.y = rand.randf() * TAU
 		add_child(rock)
+		_vis_range(rock, 220.0)
 		var bc := _add_collider({"type": "circle", "x": x + ox, "z": z + oz, "r": s * 1.0, "h": s * 1.15, "y0": base_y})
 		bc["cover"] = true # 1.2.0：岩石掩体登记（hard 全挡+挡视线，cover 标记供躲掩体 AI 检索）
 
@@ -1106,6 +1247,7 @@ func _rock(x: float, z: float, rand: RandomNumberGenerator, scale_r: float = 0.9
 	rock.scale = Vector3(1.2, 0.75, 1.0) * scale_r
 	rock.rotation.y = rand.randf() * TAU
 	add_child(rock)
+	_vis_range(rock, 200.0)
 	var rc := _add_collider({"type": "circle", "x": x, "z": z, "r": scale_r * 0.8, "h": scale_r, "y0": gy})
 	rc["cover"] = true # 1.2.0：岩石掩体登记（同 _boulder）
 
@@ -1291,10 +1433,12 @@ func _log(x: float, z: float, rand: RandomNumberGenerator) -> void:
 	var log := Util.cyl(g, 0.3, 0.34, 3.8, Util.pbr(Color(1, 1, 1), "bark", 0.95, 0.0, Vector2(2.5, 1)), Vector3(0, 0.32, 0), 10)
 	log.rotation.z = PI / 2.0
 	Util.cyl(g, 0.29, 0.29, 0.06, Util.pbr(Color(0.85, 0.72, 0.5), "", 0.9), Vector3(1.92, 0.32, 0), 10).rotation.z = PI / 2.0
+	_vis_range(g, 160.0)
 	_add_collider({"type": "circle", "x": x, "z": z, "r": 0.55, "h": 0.7, "y0": gy})
 
 func _stele(x: float, z: float, rand: RandomNumberGenerator) -> void:
-	_add_box(x, z, 0.95, 0.3, 1.7, Util.pbr(Color(0.9, 0.88, 0.82), "rock", 0.95, 0.0, Vector2(1, 1.6)), terrain_h(x, z))
+	var st := _add_box(x, z, 0.95, 0.3, 1.7, Util.pbr(Color(0.9, 0.88, 0.82), "rock", 0.95, 0.0, Vector2(1, 1.6)), terrain_h(x, z))
+	_vis_range(st, 200.0)
 
 func _lamp(x: float, z: float, _r: RandomNumberGenerator) -> void:
 	var gy := terrain_h(x, z)
@@ -1314,6 +1458,7 @@ func _ice_rock(x: float, z: float, rand: RandomNumberGenerator) -> void:
 	rock.scale = Vector3(1.25, 0.7, 1.0) * s
 	rock.rotation.y = rand.randf() * TAU
 	add_child(rock)
+	_vis_range(rock, 200.0)
 	var ic := _add_collider({"type": "circle", "x": x, "z": z, "r": s * 0.8, "h": s, "y0": gy})
 	ic["cover"] = true # 1.2.0：冰岩掩体登记（同 _rock）
 
@@ -1980,7 +2125,19 @@ func _update_grass_bend(ppos: Vector3) -> void:
 	if _grass_mm == null:
 		return
 	var still: Dictionary = {}
-	for i in _grass_base.size():
+	# 1.2.1：只扫玩家所在格及相邻格（弯曲半径 1.1m < 格边 4m，邻格足够覆盖）；
+	# 分桶缺失（旧存档路径）时回退全扫，行为与旧版一致。
+	var cand: Array = []
+	if _grass_cells.is_empty():
+		for i0 in _grass_base.size():
+			cand.append(i0)
+	else:
+		var pc := Vector2i(floori(ppos.x / 4.0), floori(ppos.z / 4.0))
+		for gx in range(pc.x - 1, pc.x + 2):
+			for gz in range(pc.y - 1, pc.y + 2):
+				var bucket: Array = _grass_cells.get(Vector2i(gx, gz), [])
+				cand.append_array(bucket)
+	for i in cand:
 		var xf: Transform3D = _grass_base[i]
 		var dx := xf.origin.x - ppos.x
 		var dz := xf.origin.z - ppos.z
@@ -2089,6 +2246,12 @@ func update_level(dt: float, player, camera_pos: Vector3) -> void:
 		else:
 			break
 	# 敌人
+	# 警觉表每帧重建一次（与敌人主循环同量级的一遍扫）：战术分散站位只遍历它，
+	# 不再每个警觉敌人各扫一遍全表（旧口径 L5 约 518 项 × 警觉数/0.3s）。
+	_alert_list.clear()
+	for e in enemies:
+		if e.alive and e._alert:
+			_alert_list.append(e)
 	for i in range(enemies.size() - 1, -1, -1):
 		var gone: bool = enemies[i].update_enemy(dt * _enemy_dt_scale, player, camera_pos)
 		# 图鉴遭遇：敌人首次进入警觉即登记（击杀遭遇走 on_kill）

@@ -66,10 +66,28 @@ var _char_btns: Dictionary = {}
 var _lives_btns: Dictionary = {}
 var _diff_btns: Dictionary = {}
 var _qual_btns: Dictionary = {}
+# 画质细项（1.2.1 设置扩展）：预设 低/中/高 批量套用一组值，单项改动后为「自定义」。
+# 默认口径（用户定）：渲染缩放 0.85 + MSAA 2x + 帧率上限 60，三端统一。
+var opt_scale := 0.85 # 渲染缩放：0.7 / 0.85 / 1.0
+var opt_msaa := 1 # 抗锯齿：0=关 / 1=2倍 / 2=4倍（Viewport MSAA 枚举）
+var opt_fps := 60 # 帧率上限：30 / 60 / 0=不限
+var opt_shadow := "mid" # 阴影：off / mid(70m) / high(120m)；贴图全局封顶 2048 见 project.godot
+var opt_dynlight := false # 动态光效：false=省电（关爆炸点光+枪口光弱化），与设置显示严格对应
+var opt_particles := "mid" # 粒子数量：low(×0.25) / mid(×0.5) / high(×1.0)
+var opt_far_anim := "simple" # 远敌动画：full=完整 / simple=简化（>70m 冻结，默认）
+var quality_custom := false # 单项改动后为 true，预设行显示「自定义」
+var _scale_btns: Dictionary = {}
+var _msaa_btns: Dictionary = {}
+var _fps_btns: Dictionary = {}
+var _shadow_btns: Dictionary = {}
+var _dyn_btns: Dictionary = {}
+var _part_btns: Dictionary = {}
+var _far_btns: Dictionary = {}
+var _gfx_panel: PanelContainer
 var _lvl_btns: Dictionary = {}
 # 设置与长期进度（统一存 user://contra3d_save.cfg）
 var difficulty := "normal" # easy / normal / hard
-var quality := "high" # low / mid / high
+var quality := "mid" # 最近一次点选的预设名 low / mid / high（1.2.1 默认中档=统一口径）
 var cleared_levels: Dictionary = {} # idx(int) -> true
 var level_ratings: Dictionary = {} # idx(int) -> "S"/"A"/"B"/"C"（历史最佳）
 var encountered: Dictionary = {} # 敌人 type(String) -> true（图鉴遭遇）
@@ -112,14 +130,14 @@ var _hint_ever_captured := false
 var _level_time := 0.0
 var _level_start_score := 0
 var _last_rating := ""
-# 触屏
+# 触屏（1.2.1 重做：自绘摇杆 JoyStick + 图标钮 IconButton，见 scripts/joystick.gd / icon_button.gd）
 var touch_ui: Control
 var _touch_move := Vector2.ZERO
 var _touch_shoot := false
 var _touch_prone := false
 var _touch_jump := false
-var _joy_center := Vector2.ZERO
-var _joy_id := -1
+var _joy_id := -1 # 摇杆当前触点 id（与 _touch_joy.touch_index 同步，供镜头拖屏排除判断）
+var _touch_joy: JoyStick
 
 const KONAMI := ["ui_up", "ui_up", "ui_down", "ui_down", "ui_left", "ui_right", "ui_left", "ui_right", "key_b", "key_a"]
 
@@ -428,7 +446,34 @@ func _refresh_toggles() -> void:
 	for k in _diff_btns:
 		(_diff_btns[k] as Button).button_pressed = String(k) == difficulty
 	for k in _qual_btns:
-		(_qual_btns[k] as Button).button_pressed = String(k) == quality
+		(_qual_btns[k] as Button).button_pressed = (String(k) == "custom") if quality_custom else (String(k) == quality)
+	for k in _scale_btns:
+		(_scale_btns[k] as Button).button_pressed = is_equal_approx(float(k), opt_scale)
+	for k in _msaa_btns:
+		(_msaa_btns[k] as Button).button_pressed = int(k) == opt_msaa
+	for k in _fps_btns:
+		(_fps_btns[k] as Button).button_pressed = int(k) == opt_fps
+	for k in _shadow_btns:
+		(_shadow_btns[k] as Button).button_pressed = String(k) == opt_shadow
+	for k in _dyn_btns:
+		(_dyn_btns[k] as Button).button_pressed = bool(k) == opt_dynlight
+	for k in _part_btns:
+		(_part_btns[k] as Button).button_pressed = String(k) == opt_particles
+	for k in _far_btns:
+		(_far_btns[k] as Button).button_pressed = String(k) == opt_far_anim
+
+## 画质设置面板的一行：标题 + 一组开关钮（entries = [[键, 显示名], ...]，点选即走 _set_opt）
+func _gfx_row(parent: VBoxContainer, title: String, entries: Array, group: Dictionary, opt_key: String) -> void:
+	var row := HBoxContainer.new()
+	row.alignment = BoxContainer.ALIGNMENT_CENTER
+	row.add_theme_constant_override("separation", 8)
+	row.add_child(_label(title, 16, Color(1, 0.8, 0.35)))
+	for e in entries:
+		var b := _toggle_btn(String(e[1]), group, e[0])
+		b.custom_minimum_size = Vector2(76, 40)
+		b.pressed.connect(_set_opt.bind(opt_key, e[0]))
+		row.add_child(b)
+	parent.add_child(row)
 
 func _build_ui() -> void:
 	ui = CanvasLayer.new()
@@ -512,6 +557,11 @@ func _build_ui() -> void:
 		qb.custom_minimum_size = Vector2(76, 40)
 		qb.pressed.connect(_set_quality.bind(String(qv[0])))
 		qual_row.add_child(qb)
+	var qc := _toggle_btn("自定义", _qual_btns, "custom")
+	qc.custom_minimum_size = Vector2(76, 40)
+	qc.tooltip_text = "逐项调整后自动进入自定义（在「画质设置」里改）"
+	qc.pressed.connect(func(): _refresh_toggles()) # 仅状态指示，不可直接点选
+	qual_row.add_child(qc)
 	mv.add_child(qual_row)
 	var lvl_row := HBoxContainer.new()
 	lvl_row.alignment = BoxContainer.ALIGNMENT_CENTER
@@ -532,6 +582,9 @@ func _build_ui() -> void:
 	var btn_ctrl := _btn("操作说明")
 	btn_ctrl.pressed.connect(func(): controls_panel.visible = true)
 	mv.add_child(btn_ctrl)
+	var btn_gfx := _btn("画质设置")
+	btn_gfx.pressed.connect(func(): _gfx_panel.visible = true)
+	mv.add_child(btn_gfx)
 	var btn_codex := _btn("敌人图鉴")
 	btn_codex.pressed.connect(_show_codex)
 	mv.add_child(btn_codex)
@@ -559,6 +612,27 @@ func _build_ui() -> void:
 	cv.add_child(btn_back)
 	controls_panel.visible = false
 	_wrap_center(controls_panel)
+	# ---- 画质设置（1.2.1：细项逐项可调；预设在主菜单「画质」行批量套用）----
+	_gfx_panel = PanelContainer.new()
+	_gfx_panel.add_theme_stylebox_override("panel", _panel_style())
+	_gfx_panel.set_anchors_preset(Control.PRESET_CENTER)
+	var gv := VBoxContainer.new()
+	gv.add_theme_constant_override("separation", 8)
+	_gfx_panel.add_child(gv)
+	gv.add_child(_label("画质设置", 24, Color(1, 0.72, 0.2)))
+	_gfx_row(gv, "渲染缩放", [[0.7, "0.7"], [0.85, "0.85"], [1.0, "1.0"]], _scale_btns, "scale")
+	_gfx_row(gv, "抗锯齿", [[0, "关"], [1, "2倍"], [2, "4倍"]], _msaa_btns, "msaa")
+	_gfx_row(gv, "帧率上限", [[30, "30"], [60, "60"], [0, "不限"]], _fps_btns, "fps")
+	_gfx_row(gv, "阴影", [["off", "关"], ["mid", "中"], ["high", "高"]], _shadow_btns, "shadow")
+	_gfx_row(gv, "动态光效", [[true, "开"], [false, "关"]], _dyn_btns, "dyn")
+	_gfx_row(gv, "粒子数量", [["low", "低"], ["mid", "中"], ["high", "高"]], _part_btns, "particles")
+	_gfx_row(gv, "远敌动画", [["full", "完整"], ["simple", "简化"]], _far_btns, "far")
+	gv.add_child(_label("动态光效「关」= 关爆炸点光 + 枪口光弱化（默认）；阴影贴图全局封顶 2048（中 70m / 高 120m）；\n远敌动画「简化」= 70 米外敌人暂停骨骼动画。除「画质」预设连带的草量需重开本关外，其余即时生效。", 13, Color(0.7, 0.75, 0.7)))
+	var btn_gfx_back := _btn("返回")
+	btn_gfx_back.pressed.connect(func(): _gfx_panel.visible = false)
+	gv.add_child(btn_gfx_back)
+	_gfx_panel.visible = false
+	_wrap_center(_gfx_panel)
 	# ---- 敌人图鉴 ----
 	codex_panel = PanelContainer.new()
 	codex_panel.add_theme_stylebox_override("panel", _panel_style())
@@ -915,44 +989,35 @@ func _build_touch() -> void:
 	touch_ui.set_anchors_preset(Control.PRESET_FULL_RECT)
 	touch_ui.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	ui.add_child(touch_ui)
-	var joy := Control.new()
-	joy.name = "Joy"
-	joy.position = Vector2(36, -196)
-	joy.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
-	joy.custom_minimum_size = Vector2(150, 150)
-	joy.mouse_filter = Control.MOUSE_FILTER_STOP
-	touch_ui.add_child(joy)
-	joy.gui_input.connect(_on_joy_input.bind(joy))
-	var mk_btn := func(text: String, pos: Vector2) -> Button:
-		var b := Button.new()
-		b.text = text
-		b.custom_minimum_size = Vector2(74, 74)
+	# 摇杆（1.2.1 重做）：自绘半透明圆盘+跟随摇杆头，真实尺寸 160×160，
+	# 左下边距各 56；命中区与可见圆盘一致（旧版是无尺寸无绘制的裸 Control，等于没有）。
+	_touch_joy = JoyStick.new()
+	_touch_joy.name = "Joy"
+	_touch_joy.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
+	_touch_joy.position = Vector2(56, -216)
+	_touch_joy.size = Vector2(160, 160)
+	touch_ui.add_child(_touch_joy)
+	# 图标钮（1.2.1）：圆形半透明底+符号（准星/↑/↓），不再用文字钮。
+	# 布局（锚右下，坐标为距右下角偏移）：射击 96 主位右下（右边距 56/下边距 72），
+	# 趴在射击正上方，跳在射击左侧偏上，整组离边 ≥48。
+	var mk := func(kind: String, dia: float, pos: Vector2) -> IconButton:
+		var b := IconButton.new()
+		b.kind = kind
+		b.diameter = dia
 		b.set_anchors_preset(Control.PRESET_BOTTOM_RIGHT)
 		b.position = pos
+		b.size = Vector2(dia, dia)
 		touch_ui.add_child(b)
 		return b
-	var shoot_b: Button = mk_btn.call("射击", Vector2(-110, -120))
-	shoot_b.button_down.connect(func(): _touch_shoot = true)
-	shoot_b.button_up.connect(func(): _touch_shoot = false)
-	var jump_b: Button = mk_btn.call("跳", Vector2(-196, -110))
-	jump_b.button_down.connect(func(): _touch_jump = true)
-	var prone_b: Button = mk_btn.call("趴", Vector2(-196, -196))
-	prone_b.toggled.connect(func(on): _touch_prone = on)
+	var fire_b: IconButton = mk.call("fire", 96.0, Vector2(-152, -168))
+	fire_b.button_down.connect(func(): _touch_shoot = true)
+	fire_b.button_up.connect(func(): _touch_shoot = false)
+	var prone_b: IconButton = mk.call("prone", 76.0, Vector2(-156, -252))
 	prone_b.toggle_mode = true
+	prone_b.toggled.connect(func(on): _touch_prone = on)
+	var jump_b: IconButton = mk.call("jump", 76.0, Vector2(-244, -180))
+	jump_b.button_down.connect(func(): _touch_jump = true)
 	touch_ui.visible = false
-
-func _on_joy_input(ev: InputEvent, joy: Control) -> void:
-	if ev is InputEventScreenTouch:
-		if ev.pressed:
-			_joy_id = ev.index
-			_joy_center = joy.global_position + Vector2(75, 75)
-		elif ev.index == _joy_id:
-			_joy_id = -1
-			_touch_move = Vector2.ZERO
-	elif ev is InputEventScreenDrag and ev.index == _joy_id:
-		var drag := ev as InputEventScreenDrag
-		var v: Vector2 = (drag.position + joy.global_position - _joy_center) / 55.0
-		_touch_move = v.limit_length(1.0)
 
 var lives_inf := false
 var diorama: Node3D
@@ -983,9 +1048,35 @@ func _load_hi() -> void:
 		difficulty = String(cfg.get_value("settings", "difficulty", "normal"))
 		if not ["easy", "normal", "hard"].has(difficulty):
 			difficulty = "normal"
-		quality = String(cfg.get_value("settings", "quality", "high"))
+		quality = String(cfg.get_value("settings", "quality", "mid"))
 		if not ["low", "mid", "high"].has(quality):
-			quality = "high"
+			quality = "mid"
+		# 1.2.1 画质细项持久化：有细项键则逐项读回（缺/非法值走默认，不报错）
+		if cfg.has_section_key("settings", "opt_scale"):
+			opt_scale = clampf(float(cfg.get_value("settings", "opt_scale", opt_scale)), 0.5, 1.0)
+			opt_msaa = clampi(int(cfg.get_value("settings", "opt_msaa", opt_msaa)), 0, 2)
+			opt_fps = int(cfg.get_value("settings", "opt_fps", opt_fps))
+			if opt_fps != 30 and opt_fps != 60:
+				opt_fps = 0 # 30/60 之外一律按「不限」
+			opt_shadow = String(cfg.get_value("settings", "opt_shadow", opt_shadow))
+			if not ["off", "mid", "high"].has(opt_shadow):
+				opt_shadow = "mid"
+			opt_dynlight = bool(cfg.get_value("settings", "opt_dynlight", opt_dynlight))
+			opt_particles = String(cfg.get_value("settings", "opt_particles", opt_particles))
+			if not ["low", "mid", "high"].has(opt_particles):
+				opt_particles = "mid"
+			opt_far_anim = String(cfg.get_value("settings", "opt_far_anim", opt_far_anim))
+			if not ["full", "simple"].has(opt_far_anim):
+				opt_far_anim = "simple"
+			quality_custom = bool(cfg.get_value("settings", "quality_custom", not _opts_match_preset(quality)))
+		elif quality == "low":
+			# 1.2.0 老存档（只有预设名）：刻意选的低档按低档组还原
+			_apply_preset_opts("low")
+		else:
+			# 老存档的 high 多为 1.2.0 旧默认值被自动写入，与刻意选择不可区分——
+			# 按 1.2.1 新出厂默认（中档统一口径）起步，玩家可一键切回高档。
+			quality = "mid"
+			quality_custom = false
 		unlocked_max = int(cfg.get_value("progress", "unlocked", 0))
 		for i in Data.LEVELS.size():
 			if bool(cfg.get_value("progress", "cleared_%d" % i, false)):
@@ -1003,6 +1094,14 @@ func _save_hi() -> void:
 	cfg.set_value("game", "hi", hi_score)
 	cfg.set_value("settings", "difficulty", difficulty)
 	cfg.set_value("settings", "quality", quality)
+	cfg.set_value("settings", "opt_scale", opt_scale)
+	cfg.set_value("settings", "opt_msaa", opt_msaa)
+	cfg.set_value("settings", "opt_fps", opt_fps)
+	cfg.set_value("settings", "opt_shadow", opt_shadow)
+	cfg.set_value("settings", "opt_dynlight", opt_dynlight)
+	cfg.set_value("settings", "opt_particles", opt_particles)
+	cfg.set_value("settings", "opt_far_anim", opt_far_anim)
+	cfg.set_value("settings", "quality_custom", quality_custom)
 	cfg.set_value("progress", "unlocked", unlocked_max)
 	for i in Data.LEVELS.size():
 		if cleared_levels.has(i):
@@ -1030,24 +1129,90 @@ func _set_difficulty(d: String) -> void:
 func _apply_difficulty() -> void:
 	projectiles.orb_speed_scale = float(DIFF_ORB.get(difficulty, 1.0))
 
-## 画质分档（默认高）：MSAA / 阴影 / 草量三项；贴图分辨率一律不动（画质优先铁律）。
-## MSAA 与菜单日光即时生效；关卡内日光与草量在建关时按 ctx 读取（换关生效）。
-func _set_quality(q: String) -> void:
+## 画质设置（1.2.1）：预设（低/中/高）批量套用一组细项，细项也可在「画质设置」面板逐项调，
+## 改单项后预设显示「自定义」；全部持久化进存档。贴图分辨率一律不动（画质优先铁律）。
+## 生效时机：缩放/MSAA/帧率/阴影/远敌动画/光效/粒子均即时；预设连带的草量在建关时按 ctx
+## 读取（重开本关生效，面板说明里已注明）。阴影贴图尺寸全局封顶 2048（project.godot 两项）。
+## 预设组（低/中/高）= 一组细项值；「中」即 1.2.1 出厂默认（缩放 0.85 + MSAA 2x + 帧率 60，三端统一）
+func _preset_opts(q: String) -> Dictionary:
+	match q:
+		"low":
+			return {"scale": 0.7, "msaa": 0, "fps": 60, "shadow": "off", "dyn": false, "particles": "low", "far": "simple"}
+		"high":
+			return {"scale": 1.0, "msaa": 2, "fps": 0, "shadow": "high", "dyn": true, "particles": "high", "far": "full"}
+		_:
+			return {"scale": 0.85, "msaa": 1, "fps": 60, "shadow": "mid", "dyn": false, "particles": "mid", "far": "simple"}
+
+func _apply_preset_opts(q: String) -> void:
+	var p := _preset_opts(q)
+	opt_scale = float(p["scale"])
+	opt_msaa = int(p["msaa"])
+	opt_fps = int(p["fps"])
+	opt_shadow = String(p["shadow"])
+	opt_dynlight = bool(p["dyn"])
+	opt_particles = String(p["particles"])
+	opt_far_anim = String(p["far"])
 	quality = q
+	quality_custom = false
+
+func _opts_match_preset(q: String) -> bool:
+	var p := _preset_opts(q)
+	return opt_scale == float(p["scale"]) and opt_msaa == int(p["msaa"]) and opt_fps == int(p["fps"]) \
+		and opt_shadow == String(p["shadow"]) and opt_dynlight == bool(p["dyn"]) \
+		and opt_particles == String(p["particles"]) and opt_far_anim == String(p["far"])
+
+func _set_quality(q: String) -> void:
+	_apply_preset_opts(q)
 	_refresh_toggles()
 	_save_hi()
 	_apply_quality()
 
+## 单项改动入口：写值后若整组恰好等于某预设则归该预设，否则标记「自定义」
+func _set_opt(key: String, value: Variant) -> void:
+	match key:
+		"scale": opt_scale = float(value)
+		"msaa": opt_msaa = int(value)
+		"fps": opt_fps = int(value)
+		"shadow": opt_shadow = String(value)
+		"dyn": opt_dynlight = bool(value)
+		"particles": opt_particles = String(value)
+		"far": opt_far_anim = String(value)
+	quality_custom = true
+	for q in ["low", "mid", "high"]:
+		if _opts_match_preset(q):
+			quality = q
+			quality_custom = false
+			break
+	_refresh_toggles()
+	_save_hi()
+	_apply_quality()
+
+func _particle_factor() -> float:
+	match opt_particles:
+		"low": return 0.25
+		"high": return 1.0
+		_: return 0.5
+
 func _apply_quality() -> void:
+	# 渲染三项即时生效（视口级缩放/MSAA + 引擎帧率上限；不动窗口分辨率与贴图）
 	var vp := get_viewport()
-	match quality:
-		"low": vp.msaa_3d = Viewport.MSAA_DISABLED
-		"mid": vp.msaa_3d = Viewport.MSAA_2X
-		_: vp.msaa_3d = Viewport.MSAA_4X
+	vp.scaling_3d_scale = opt_scale
+	match opt_msaa:
+		0: vp.msaa_3d = Viewport.MSAA_DISABLED
+		2: vp.msaa_3d = Viewport.MSAA_4X
+		_: vp.msaa_3d = Viewport.MSAA_2X
+	Engine.max_fps = opt_fps
+	# 阴影即时切换：菜单太阳 + 当前关卡太阳（距离档 off/70m/120m；
+	# 阴影贴图尺寸全局封顶 2048 由 project.godot 的 directional_shadow/size 保证，中高共用）
 	if is_instance_valid(diorama):
 		var sun := diorama.get_node_or_null("MenuSun") as DirectionalLight3D
 		if sun:
-			sun.shadow_enabled = quality != "low"
+			sun.shadow_enabled = opt_shadow != "off"
+	if current_level:
+		current_level.apply_shadow_mode(opt_shadow)
+		current_level.far_anim_simple = opt_far_anim != "full" # 远敌冻结开关即时生效
+	if projectiles:
+		projectiles.set_fx_options(opt_dynlight, _particle_factor()) # 光效/粒子即时生效
 
 func _update_hi_label() -> void:
 	_lbl_hi.text = "最高分: %d" % hi_score
@@ -1065,6 +1230,7 @@ func show_menu() -> void:
 	victory_panel.visible = false
 	controls_panel.visible = false
 	codex_panel.visible = false
+	_gfx_panel.visible = false
 	touch_ui.visible = false
 	menu_panel.visible = true
 	_menu_env()
@@ -1120,6 +1286,7 @@ func start_game(from_level: int = 0) -> void:
 	victory_panel.visible = false
 	controls_panel.visible = false
 	codex_panel.visible = false
+	_gfx_panel.visible = false
 	hud.visible = true
 	touch_ui.visible = DisplayServer.is_touchscreen_available()
 	_load_level(from_level)
@@ -1156,6 +1323,10 @@ func _load_level(idx: int) -> void:
 		"soldier_scenes": soldier_scenes,
 		"difficulty": difficulty,
 		"quality": quality,
+		# 1.2.1 画质细项进关卡构建 ctx：阴影距离档、草量（仍按预设名）、远敌动画冻结开关
+		"shadow": opt_shadow,
+		"grass_scale": {"low": 0.45, "mid": 0.75, "high": 1.0}[quality],
+		"far_anim": opt_far_anim,
 		"staged": true, # 只备阶段不执行，下面逐帧驱动（加载进度的数据源）
 		"on_score": _add_score,
 		"on_kill": _on_kill,
@@ -1503,6 +1674,10 @@ func _input(ev: InputEvent) -> void:
 		_pitch = clampf(_pitch - ev.relative.y * 0.006, float(Data.CAMERA["pitch_min"]), float(Data.CAMERA["pitch_max"]))
 
 func _build_snapshot() -> Dictionary:
+	# 摇杆值每帧从控件同步（控件自身处理触摸/拖动，松手自动回中归零）
+	if _touch_joy:
+		_touch_move = _touch_joy.value
+		_joy_id = _touch_joy.touch_index
 	var mv := Vector2(
 		Input.get_axis("move_left", "move_right"),
 		Input.get_axis("move_forward", "move_back"))
@@ -1556,6 +1731,7 @@ func _process(dt: float) -> void:
 	projectiles.update_projectiles(dt, {
 		"targets": current_level.get_targets(),
 		"colliders": current_level.colliders,
+		"colliders_at": Callable(current_level, "colliders_at"), # 1.2.1 空间索引宽相位
 		"player": player,
 		"on_player_hit": func(cells): player.take_damage(cells),
 		"on_enemy_hit": Callable(self, "_on_enemy_hitstop"),
@@ -1568,6 +1744,7 @@ func _process(dt: float) -> void:
 		"aiming": aiming,
 		"prone": player.prone,
 		"colliders": current_level.colliders,
+		"colliders_at": Callable(current_level, "colliders_at"), # 1.2.1 空间索引宽相位
 		"targets": current_level.get_targets(),
 	})
 	# 受击红闪衰减

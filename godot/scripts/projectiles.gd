@@ -85,6 +85,26 @@ var _puff_idx := 0
 var _th: Callable # 最近一帧的地形高度回调（弹壳落地/炮弹拖尾用）
 var shake_hook: Callable # main 设置：func(pos, radius)，按距离衰减给镜头震屏
 
+# ---- 1.2.1 表现分档（main 设置驱动，见 set_fx_options）----
+var _fx_lights := false # 动态光效：true=全量；false=省电（关爆炸点光、枪口光弱化）
+var _fx_particle_factor := 0.5 # 粒子量系数（低 0.25 / 中 0.5 / 高 1.0）
+var _muzzle_decay := 95.0 # 枪口光衰减速率：全量 46/s（约 0.06s），省电 95/s（约 0.016s）
+
+## 设置即时生效：光效开关切换爆炸点光与枪口光参数；粒子系数逐台改 amount
+## （发射器建池时以 meta 记了 base_amount，系数只乘不改原始量）。
+func set_fx_options(lights_on: bool, particle_factor: float) -> void:
+	_fx_lights = lights_on
+	_fx_particle_factor = particle_factor
+	_muzzle_decay = 46.0 if lights_on else 95.0
+	if _muzzle_light:
+		_muzzle_light.omni_range = 5.5 if lights_on else 3.2
+		if not lights_on:
+			for l in _lights:
+				l.light_energy = 0.0
+	for ch in get_children():
+		if ch is GPUParticles3D and ch.has_meta("base_amount"):
+			(ch as GPUParticles3D).amount = maxi(1, int(round(float(ch.get_meta("base_amount")) * particle_factor)))
+
 func _take(pool: Array) -> MeshInstance3D:
 	while not pool.is_empty():
 		var m = pool.pop_back()
@@ -160,6 +180,7 @@ func _tex_mat(tex: Texture2D, tint: Color, add_blend: bool) -> Material:
 func _make_emitter(tex: Texture2D, amount: int, lifetime: float, color: Color, vel: float, gravity: Vector3, spread: float, quad_size: float, add_blend: bool, damping: float = 0.0, shape_r: float = 0.3) -> GPUParticles3D:
 	var p := GPUParticles3D.new()
 	p.amount = amount
+	p.set_meta("base_amount", amount) # 1.2.1 粒子分档的乘算基数（set_fx_options）
 	p.lifetime = lifetime
 	p.one_shot = true
 	p.explosiveness = 0.9
@@ -307,7 +328,7 @@ func spawn_muzzle_flash(pos: Vector3, dir: Vector3, mul: float = 1.0, with_light
 	_flashes.append({"mesh": mesh, "t": 0.0, "dur": 0.05, "s0": s, "pool": _free_flash})
 	if with_light and _muzzle_light:
 		_muzzle_light.global_position = pos + dir.normalized() * 0.25
-		_muzzle_light.light_energy = 2.8
+		_muzzle_light.light_energy = 2.8 if _fx_lights else 1.5 # 省电口径：能量减半（范围/衰减在 set_fx_options）
 
 ## 抛弹壳：黄铜小壳从抛壳口弹出，自旋+重力+落地弹跳一次
 func spawn_shell(pos: Vector3, eject_dir: Vector3) -> void:
@@ -449,12 +470,13 @@ func spawn_explosion_fx(pos: Vector3, radius: float, color: Color = Color(1, 0.5
 		mesh.rotation = Vector3.ZERO
 		mesh.global_position = pos
 		_fx.append({"mesh": mesh, "t": 0.0, "dur": 0.16, "radius": radius, "pool": _free_fx})
-		for l in _lights:
-			if l.light_energy <= 0.0:
-				l.global_position = pos
-				l.light_color = color
-				l.light_energy = 2.0 + radius * 0.55
-				break
+		if _fx_lights: # 动态光效关（默认省电口径）：爆炸不点点光，粒子/环/闪光照旧
+			for l in _lights:
+				if l.light_energy <= 0.0:
+					l.global_position = pos
+					l.light_color = color
+					l.light_energy = 2.0 + radius * 0.55
+					break
 	if shake_hook.is_valid():
 		shake_hook.call(pos, radius)
 	# 爆炸音按半径加强：越大越响、音高越低沉
@@ -482,25 +504,44 @@ func _seg_sphere(a: Vector3, b: Vector3, c: Vector3, r: float) -> bool:
 	var p := a + ab * t
 	return p.distance_squared_to(c) <= r * r
 
+## 单个碰撞体对点的命中判定（全表版与候选版共用，判定式逐字不变）
+func _col_match(p: Vector3, c: Dictionary) -> bool:
+	if c.get("disabled", false) or c.get("no_collide", false):
+		return false
+	var y0 := float(c.get("y0", 0.0))
+	if p.y < y0 or p.y > y0 + float(c.get("h", 6.0)):
+		return false
+	if c["type"] == "box":
+		if absf(p.x - float(c["x"])) <= float(c["w"]) / 2.0 and absf(p.z - float(c["z"])) <= float(c["d"]) / 2.0:
+			return true
+	elif c["type"] == "circle":
+		var dx := p.x - float(c["x"])
+		var dz := p.z - float(c["z"])
+		var r := float(c["r"])
+		if dx * dx + dz * dz <= r * r:
+			return true
+	return false
+
 ## 返回点所在的第一个有效碰撞体（无则空字典）。碰撞体可带 mat 标签：
 ## hard（默认，岩石/金属/混凝土/树干）全挡；wood（木箱/木板）玩家子弹可穿透
 func _collider_at(p: Vector3, colliders: Array) -> Dictionary:
 	for c in colliders:
-		if c.get("disabled", false) or c.get("no_collide", false):
-			continue
-		var y0 := float(c.get("y0", 0.0))
-		if p.y < y0 or p.y > y0 + float(c.get("h", 6.0)):
-			continue
-		if c["type"] == "box":
-			if absf(p.x - float(c["x"])) <= float(c["w"]) / 2.0 and absf(p.z - float(c["z"])) <= float(c["d"]) / 2.0:
-				return c
-		elif c["type"] == "circle":
-			var dx := p.x - float(c["x"])
-			var dz := p.z - float(c["z"])
-			var r := float(c["r"])
-			if dx * dx + dz * dz <= r * r:
-				return c
+		if _col_match(p, c):
+			return c
 	return {}
+
+## 候选集版（1.2.1 空间索引）：候选来自 level.colliders_at（单格桶+大跨度常驻体，
+## 非全局插入序）——逐个判定后取 _ci（插入序号）最小者，与全表版「首个命中」等价。
+func _collider_at_c(p: Vector3, cand: Array) -> Dictionary:
+	var best := {}
+	var best_ci := 1 << 30
+	for c in cand:
+		if _col_match(p, c):
+			var ci := int((c as Dictionary).get("_ci", 0))
+			if ci < best_ci:
+				best_ci = ci
+				best = c
+	return best
 
 ## 子弹命中掩体/地形：火花粒子（按传入色调染），替代旧发光球
 func spawn_impact_fx(pos: Vector3, color: Color) -> void:
@@ -526,6 +567,20 @@ func _damage_wood(c: Dictionary, dmg: int) -> void:
 			spawn_impact_fx((node as Node3D).global_position, Color(0.8, 0.6, 0.35))
 			(node as Node).queue_free()
 
+## 玩家子弹目标挑选（1.2.1 宽相位候选版）：与旧全表遍历同一判定——
+## 线段-球命中里取沿弹道参数 tt 最近者，写入 best{t, tt}。
+func _bullet_pick_target(prev: Vector3, np: Vector3, seg_len: float, arr: Array, best: Dictionary) -> void:
+	for t in arr:
+		if not t.alive or t.get("targetable") == false:
+			continue
+		if _seg_sphere(prev, np, Vector3(t.hit_x, t.hit_y, t.hit_z), float(t.hit_r)):
+			var tt := 0.0
+			if seg_len > 0.001:
+				tt = clampf((Vector3(t.hit_x, t.hit_y, t.hit_z) - prev).dot(np - prev) / (seg_len * seg_len), 0.0, 1.0)
+			if tt < float(best["tt"]):
+				best["tt"] = tt
+				best["t"] = t
+
 func update_projectiles(dt: float, args: Dictionary) -> void:
 	var targets: Array = args["targets"]
 	var colliders: Array = args["colliders"]
@@ -535,6 +590,19 @@ func update_projectiles(dt: float, args: Dictionary) -> void:
 	_th = th
 	var on_enemy_hit: Callable = args.get("on_enemy_hit", Callable()) # 玩家命中敌人回调（main 用作顿帧触发）
 	var gen0 := _gen
+	var col_at: Callable = args.get("colliders_at", Callable()) # 1.2.1 关卡空间索引点查询（缺失回退全表）
+	# 1.2.1 目标宽相位：目标按 hit_z 每 8m 分桶，hit_r>3 的大目标常驻全测；
+	# 子弹只测弹道 z 向包围盒（外扩 3m ≥ 桶内最大 hit_r）覆盖的桶。
+	var t_buckets := {}
+	var t_loose: Array = []
+	for t in targets:
+		if float(t.hit_r) > 3.0:
+			t_loose.append(t)
+		else:
+			var bk := floori(float(t.hit_z) / 8.0)
+			if not t_buckets.has(bk):
+				t_buckets[bk] = []
+			(t_buckets[bk] as Array).append(t)
 
 	# ---- 玩家子弹 ----
 	for i in range(_bullets.size() - 1, -1, -1):
@@ -550,26 +618,26 @@ func update_projectiles(dt: float, args: Dictionary) -> void:
 			# 同一步内敌人与掩体竞争：按沿弹道距离 t 取舍（掩体在前则先结算掩体）。
 			# 旧顺序敌人整段先判：敌人贴掩体站位时子弹「穿箱直击」且木箱不吃伤害
 			# （1.2.0 智能 AI 让敌人贴箱蹲守后此路径可达，cover 套件实测）。
-			var hit_t = null
-			var hit_tt := 2.0
 			var seg := np - prev
 			var seg_len := seg.length()
-			for t in targets:
-				if not t.alive or t.get("targetable") == false:
-					continue
-				if _seg_sphere(prev, np, Vector3(t.hit_x, t.hit_y, t.hit_z), float(t.hit_r)):
-					var tt := 0.0
-					if seg_len > 0.001:
-						tt = clampf((Vector3(t.hit_x, t.hit_y, t.hit_z) - prev).dot(seg) / (seg_len * seg_len), 0.0, 1.0)
-					if tt < hit_tt:
-						hit_tt = tt
-						hit_t = t
-			# 掩体采样：中点+终点双采样，防高速子弹一步跨过薄掩体
-			var hit_c := _collider_at((prev + np) * 0.5, colliders)
-			var hit_p := (prev + np) * 0.5
+			var best := {"t": null, "tt": 2.0}
+			var zb0 := floori((minf(prev.z, np.z) - 3.0) / 8.0)
+			var zb1 := floori((maxf(prev.z, np.z) + 3.0) / 8.0)
+			for bk in range(zb0, zb1 + 1):
+				var arr: Array = t_buckets.get(bk, [])
+				if not arr.is_empty():
+					_bullet_pick_target(prev, np, seg_len, arr, best)
+			if not t_loose.is_empty():
+				_bullet_pick_target(prev, np, seg_len, t_loose, best)
+			var hit_t = best["t"]
+			var hit_tt := float(best["tt"])
+			# 掩体采样：中点+终点双采样，防高速子弹一步跨过薄掩体（1.2.1：走空间索引候选）
+			var mid_p := (prev + np) * 0.5
+			var hit_c: Dictionary = _collider_at_c(mid_p, col_at.call(mid_p.x, mid_p.z)) if col_at.is_valid() else _collider_at(mid_p, colliders)
+			var hit_p := mid_p
 			var col_tt := 0.5
 			if hit_c.is_empty():
-				hit_c = _collider_at(np, colliders)
+				hit_c = _collider_at_c(np, col_at.call(np.x, np.z)) if col_at.is_valid() else _collider_at(np, colliders)
 				hit_p = np
 				col_tt = 1.0
 			if not hit_c.is_empty() and (b["pen"] as Array).has(hit_c):
@@ -630,7 +698,7 @@ func update_projectiles(dt: float, args: Dictionary) -> void:
 					return
 				dead = true
 				cause = "hit"
-		if not dead and not _collider_at(np, colliders).is_empty():
+		if not dead and not (_collider_at_c(np, col_at.call(np.x, np.z)) if col_at.is_valid() else _collider_at(np, colliders)).is_empty():
 			# 敌方光弹是低速能量体：任何实体掩体（含木箱）都能挡
 			spawn_impact_fx(np, Color(1, 0.5, 0.3))
 			dead = true
@@ -720,7 +788,7 @@ func update_projectiles(dt: float, args: Dictionary) -> void:
 		else:
 			fl["mesh"].scale = Vector3.ONE * float(fl["s0"]) * (1.1 - 0.35 * fk)
 	if _muzzle_light and _muzzle_light.light_energy > 0.0:
-		_muzzle_light.light_energy = maxf(0.0, _muzzle_light.light_energy - dt * 46.0)
+		_muzzle_light.light_energy = maxf(0.0, _muzzle_light.light_energy - dt * _muzzle_decay)
 
 	# ---- 冲击波环 ----
 	for i in range(_rings.size() - 1, -1, -1):

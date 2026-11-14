@@ -37,6 +37,7 @@ func update_rig(dt: float, args: Dictionary) -> void:
 	var pitch: float = args["pitch"]
 	var aiming: bool = args["aiming"]
 	var colliders: Array = args["colliders"]
+	var col_at: Callable = args.get("colliders_at", Callable()) # 1.2.1 空间索引点查询（缺失回退全表）
 	var targets: Array = args["targets"]
 	var th := float(Data.CAMERA["target_height_prone"] if args.get("prone", false) else Data.CAMERA["target_height"])
 	var anchor := anchor_pos + Vector3(0, th, 0)
@@ -48,7 +49,7 @@ func update_rig(dt: float, args: Dictionary) -> void:
 	for i in range(1, steps + 1):
 		var t := float(i) / steps
 		var p: Vector3 = anchor.lerp(desired, t)
-		if _inside_any(p, colliders, pad):
+		if _inside_any(p, col_at.call(p.x, p.z) if col_at.is_valid() else colliders, pad):
 			ok = anchor.lerp(desired, float(i - 1) / steps)
 			break
 		ok = p

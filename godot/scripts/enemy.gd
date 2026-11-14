@@ -637,6 +637,7 @@ func _die() -> void:
 	if _anim and _death_clip:
 		# 真死亡动画（骨骼倒地），不再整个人像纸片一样翻倒
 		_death_t = _death_len
+		_anim.active = true # 远敌冻结中被击杀也要把死亡动画播完（1.2.1）
 		_anim.play("Death01", 0.08)
 	elif _anim:
 		_death_t = 0.85
@@ -691,7 +692,17 @@ func update_enemy(dt: float, player, camera_pos: Vector3) -> bool:
 	# 远处降频：距玩家 >110m 的敌人每 0.3 秒批量步进一次，保开放世界帧率（死亡走逐帧分支不受影响）
 	var pdx: float = player.global_position.x - global_position.x
 	var pdz: float = player.global_position.z - global_position.z
-	if pdx * pdx + pdz * pdz > 12100.0:
+	var pdist2 := pdx * pdx + pdz * pdz
+	# 远敌动画冻结（1.2.1，设置「远敌动画=简化」）：>70m 暂停骨骼动画播放，进 70m 恢复；
+	# 冻结只停 AnimationPlayer，状态机/位移/开火判定照旧（行为验收口径不变）。
+	if _anim:
+		var lvl_a = _ctx.get("level")
+		var freeze: bool = lvl_a != null and bool(lvl_a.far_anim_simple) and pdist2 > 4900.0
+		if freeze and _anim.active:
+			_anim.active = false
+		elif not freeze and not _anim.active:
+			_anim.active = true
+	if pdist2 > 12100.0:
 		_dormant += dt
 		if _dormant < 0.3:
 			return false
@@ -719,12 +730,19 @@ func update_enemy(dt: float, player, camera_pos: Vector3) -> bool:
 	_los_t -= dt
 	if _los_t <= 0.0:
 		_los_t = 0.22 + randf() * 0.1
-		_los_ok = _compute_los(player)
-		if _los_ok and dist < float(_data.get("range", 30.0)) * 1.25:
-			_alert = true
-		if _los_ok and _alert:
-			_last_seen = player.global_position # 搜索行为的目击点（1.2.0 智能层）
-			_seen_age = 0.0
+		# 1.2.1 相关性截断（旧口径全关敌人无差别算 LOS，远敌单次达数 ms，是头号热点）：
+		# 未警觉且 >40m：警觉触发上限 = 射程×1.25（全兵种最大 30×1.25≈37.5m），算了也
+		# 不可能触发，跳过；警觉且 >64m：开火上限 30m、压近上限 60m，同样无意义，
+		# 直接记无视线——搜索逻辑按「丢视线」推进，与真算出被挡的结果一致。
+		if (not _alert and dist > 40.0) or dist > 64.0:
+			_los_ok = false
+		else:
+			_los_ok = _compute_los(player)
+			if _los_ok and dist < float(_data.get("range", 30.0)) * 1.25:
+				_alert = true
+			if _los_ok and _alert:
+				_last_seen = player.global_position # 搜索行为的目击点（1.2.0 智能层）
+				_seen_age = 0.0
 	if dist < 9.0 and player.alive:
 		_alert = true
 	# 警觉表现：刚发现玩家时「！」弹出 0.85 秒；未交战的站桩射手在营地里巡逻走动
@@ -1002,7 +1020,7 @@ func _point_blocked(x: float, z: float, my_y: float) -> bool:
 	var lvl = _ctx.get("level")
 	if lvl == null:
 		return false
-	for c in lvl.colliders:
+	for c in lvl.colliders_at(x, z): # 1.2.1 空间索引候选（判定式不变）
 		if bool(c.get("disabled", false)) or bool(c.get("no_collide", false)):
 			continue
 		var y0 := float(c.get("y0", 0.0))
@@ -1088,7 +1106,7 @@ func _los_blocked_dense(a: Vector3, b: Vector3) -> bool:
 		var p: Vector3 = a.lerp(b, float(i) / float(n))
 		if lvl.terrain_h(p.x, p.z) > p.y + 0.3:
 			return true
-		for c in lvl.colliders:
+		for c in lvl.colliders_at(p.x, p.z): # 1.2.1 空间索引候选（判定式不变）
 			if c.get("disabled", false) or c.get("no_collide", false):
 				continue
 			var y0 := float(c.get("y0", 0.0))
@@ -1112,7 +1130,8 @@ func _find_cover(player) -> bool:
 	var tgt := Vector3(player.global_position.x, player.chest_y(), player.global_position.z)
 	var best := 1.0e9
 	var found := false
-	for c in lvl.colliders:
+	# 1.2.1：只检索 16m 区域内的候选（函数内 dc>15 的本来就跳过，候选为超集）
+	for c in lvl.colliders_in_box(global_position.x - 16.0, global_position.z - 16.0, global_position.x + 16.0, global_position.z + 16.0):
 		if not bool(c.get("cover", false)) or bool(c.get("disabled", false)):
 			continue
 		var cx := float(c["x"])
@@ -1211,7 +1230,7 @@ func _update_tactics(dt: float, player, dist: float) -> void:
 		_sep_vec = Vector2.ZERO
 		var lvl0 = _ctx.get("level")
 		if lvl0:
-			for e in lvl0.enemies:
+			for e in lvl0._alert_list: # 1.2.1：只遍历关卡维护的警觉表（内层 _alert 过滤保留）
 				if e == self or not e.alive or not e._alert:
 					continue
 				var ox: float = global_position.x - e.global_position.x
